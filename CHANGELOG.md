@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `background-color` on `<thead>`, `<tbody>` or `<tfoot>` (or their `bgcolor` attribute) is
+  painted (#106). The row groups were not boxes of their own, so nothing drew them, and
+  Tailwind's `<tbody class="bg-white">` and `<thead class="bg-gray-50">` showed the colour
+  behind the table instead. The row group is painted behind its rows and cells (CSS2.1
+  17.5.1), over each of its cells, so `border-spacing` gaps show the table's background. When
+  a table splits across pages, each page's fragment covers only its own rows. A
+  `background-image` on a row group and backgrounds on `<colgroup>`/`<col>` are still not
+  painted.
 - Text after an `inline-block` (or `inline-flex`) box taller than the text no longer overlaps
   the box (#91). When a line holding such a box ended by wrapping or at a `<br>`, the next
   line started one text line-height lower instead of below the box, so the trailing text was
