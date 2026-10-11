@@ -86,7 +86,7 @@
 | - | - | - |
 | `calc()` | ⚠️ | `+`/`-`/`*`/`/`と括弧・`calc()`のネスト。項に使えるのは長さ(絶対単位・`em`/`rem`)・`%`・数値のみ。長さ・パーセンテージを取るプロパティ全般で使える |
 | `min()` / `max()` / `clamp()` | ❌ | |
-| `var()` | ✅ | カスタムプロパティ(`--foo`)は他のプロパティと同じく要素ごとにカスケード(詳細度・記述順・`!important`・`style`属性)し、継承する。`var()`は計算値の時点でその要素のカスタムプロパティで置換してからパースする。フォールバック(`var(--x, 10px)`、入れ子可)・カスタムプロパティ同士の参照(循環は無効)・`initial`/`inherit`に対応。解決できない`var()`を含む宣言は計算値の時点で無効になり、そのプロパティは継承値(継承されるプロパティ)か初期値になる。`@page`(`size`・余白・マージンボックス)には要素がないため`:root`(`<html>`)の値で解決し、`@page`内に書いたカスタムプロパティは参照できない。`::before`/`::after`の`content`は要素の値を使う。`@property`と`!important`付きの通常プロパティ(`color: var(--c) !important`)は未対応 |
+| `var()` | ✅ | カスタムプロパティ(`--foo`)は他のプロパティと同じく要素ごとにカスケード(詳細度・記述順・`!important`・`style`属性)する。未登録または`@property`で`inherits: true`のものは継承し、`inherits: false`のものは要素ごとに登録時の`initial-value`から始まる。`var()`は計算値の時点でその要素のカスタムプロパティで置換してからパースする。フォールバック(`var(--x, 10px)`、入れ子可)・カスタムプロパティ同士の参照(循環は無効)・`initial`/`inherit`/`unset`に対応。解決できない登録済みカスタムプロパティは`unset`として扱う。`@page`(`size`・余白・マージンボックス)には要素がないため`:root`(`<html>`)の値で解決し、登録時の初期値も参照できる。`@page`内に書いたカスタムプロパティは参照できない。`::before`/`::after`の`content`は要素の値を使う。`!important`付きの通常プロパティ(`color: var(--c) !important`)は未対応 |
 | `url()` | ✅ | `background-image`/`list-style-image`/`@font-face`の`src`/`@import`。相対URLは`<base href>`または入力元を基準に解決する |
 | `attr()` | ⚠️ | `content`の中でのみ使える |
 | `counter()` / `counters()` | ✅ | `content`の中。第2引数のスタイルは`list-style-type`の値集合 |
@@ -135,7 +135,8 @@
 | `@import` | ✅ | ネスト(深さ上限16、超過分はその1件だけ無視)・循環参照の検出に対応。`@import url(...) screen;`のようなメディアクエリ条件は評価せず常に取り込む |
 | `@charset` | ❌ | 入力はUTF-8前提 |
 | `@layer` | ⚠️ | ブロックの中のルールを書かれた順にトップレベルへ展開する(`@layer a { .x {} }`は`.x {}`と同じ)。レイヤーの優先順位は実装せず、通常のカスケード(詳細度・後勝ち)で決まる。`@layer a, b;`の順序宣言は無視する。Tailwind v4のように出力全体を`@layer`で包むCSSをそのまま渡せる |
-| `@supports` / `@keyframes` / `@namespace` / `@counter-style` / `@container` / `@property` | ❌ | ブロックごと無視される |
+| `@property` | ⚠️ | `syntax`・`inherits`・`initial-value`を読む(`syntax: "*"`では`initial-value`を省略可)。不正なルールは全体を無視し、同名では文書順で最後の有効な登録が勝つ。適用される`@media`と`@layer`の中でも使える。`syntax`は受理するが現在はすべて`"*"`として扱うため、型検査と宣言元要素での`em`等の計算は行わない |
+| `@supports` / `@keyframes` / `@namespace` / `@counter-style` / `@container` | ❌ | ブロックごと無視される |
 
 ## ストリーミングモード固有の制約
 

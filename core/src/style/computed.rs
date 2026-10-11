@@ -15,7 +15,7 @@ use super::cascade::{
 use super::css_wide::{copy_computed, is_inherited, CssWideKeyword};
 use super::custom_properties::{
     compute_custom_properties, resolve_declarations, resolve_unparsed, uses_variables,
-    CustomProperties,
+    CustomProperties, PropertyRegistrations,
 };
 use super::presentational::presentational_hint_declarations;
 use super::properties::PropertyDeclaration;
@@ -606,6 +606,7 @@ pub fn compute_styles(
     let ctx = StyleContext {
         ua,
         author,
+        registrations: PropertyRegistrations::from_stylesheets(ua, author),
         root_font_size: Cell::new(ComputedStyle::default().font_size.0),
     };
     // Counters and quote depth are each one per document (batch processing handles the whole
@@ -647,9 +648,16 @@ pub fn compute_styles_with_parent(
     quote_depth: &mut i32,
 ) -> HashMap<NodeId, Rc<ComputedStyle>> {
     let mut styles = HashMap::new();
+    let registrations = parent_style.custom_properties.registrations();
+    let registrations = if registrations.is_empty() {
+        PropertyRegistrations::from_stylesheets(ua, author)
+    } else {
+        registrations
+    };
     let ctx = StyleContext {
         ua,
         author,
+        registrations,
         root_font_size: Cell::new(root_font_size),
     };
     compute_recursive(
@@ -684,6 +692,10 @@ pub fn compute_single_element_style(
     counters: &mut HashMap<String, Vec<i32>>,
     quote_depth: &mut i32,
 ) -> ComputedStyle {
+    let registrations = parent_style
+        .map(|style| style.custom_properties.registrations())
+        .filter(|registrations| !registrations.is_empty())
+        .unwrap_or_else(|| PropertyRegistrations::from_stylesheets(ua, author));
     compute_element_style(
         dom,
         element,
@@ -691,6 +703,7 @@ pub fn compute_single_element_style(
         root_font_size,
         ua,
         author,
+        &registrations,
         counters,
         quote_depth,
     )
@@ -706,13 +719,17 @@ pub fn root_custom_properties(dom: &Dom, ua: &Stylesheet, author: &Stylesheet) -
         .children(dom.document())
         .find(|&child| matches!(dom.node(child).data, NodeData::Element { .. }))
     else {
-        return CustomProperties::default();
+        return CustomProperties::with_registrations(PropertyRegistrations::from_stylesheets(
+            ua, author,
+        ));
     };
     let (ua_declarations, author_declarations) =
         matching_declarations_by_origin(dom, root, ua, author);
     let inline_declarations = inline_style_declarations(dom, root);
+    let initial =
+        CustomProperties::with_registrations(PropertyRegistrations::from_stylesheets(ua, author));
     compute_custom_properties(
-        &CustomProperties::default(),
+        &initial,
         ua_declarations
             .iter()
             .copied()
@@ -727,6 +744,7 @@ pub fn root_custom_properties(dom: &Dom, ua: &Stylesheet, author: &Stylesheet) -
 struct StyleContext<'a> {
     ua: &'a Stylesheet,
     author: &'a Stylesheet,
+    registrations: PropertyRegistrations,
     /// The computed font size of the root element (`<html>`), which `rem` is relative to.
     /// Fixed at the first element found while walking the tree.
     root_font_size: Cell<f32>,
@@ -760,6 +778,7 @@ fn compute_recursive(
                 ctx.root_font_size.get(),
                 ctx.ua,
                 ctx.author,
+                &ctx.registrations,
                 counters,
                 quote_depth,
             );
@@ -830,6 +849,7 @@ fn compute_element_style(
     root_font_size: f32,
     ua: &Stylesheet,
     author: &Stylesheet,
+    registrations: &PropertyRegistrations,
     counters: &mut HashMap<String, Vec<i32>>,
     quote_depth: &mut i32,
 ) -> (ComputedStyle, Vec<String>, Option<Vec<ContentPart>>) {
@@ -976,14 +996,18 @@ fn compute_element_style(
             .chain(author_declarations.iter().copied())
             .chain(inline_declarations.iter())
     };
-    let inherited_custom = parent
+    let mut inherited_custom = parent
         .map(|p| p.custom_properties.clone())
         .unwrap_or_default();
-    let custom_properties = if uses_variables(all_declarations()) {
-        compute_custom_properties(&inherited_custom, all_declarations())
-    } else {
-        inherited_custom
-    };
+    if !inherited_custom.shares_registrations(registrations) {
+        inherited_custom.set_registrations(registrations.clone());
+    }
+    let custom_properties =
+        if !uses_variables(all_declarations()) && inherited_custom.can_share_with_child() {
+            inherited_custom
+        } else {
+            compute_custom_properties(&inherited_custom, all_declarations())
+        };
 
     // The longhands whose winning declaration is a CSS-wide keyword, by placeholder.
     let mut css_wide: Vec<(PropertyDeclaration, CssWideKeyword)> = Vec::new();

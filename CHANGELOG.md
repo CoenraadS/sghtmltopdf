@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `@property` registrations now provide custom-property initial values and control inheritance
+  (#88). This supports Tailwind v4's registered `--tw-*` properties, including its border
+  utilities without a separate `:root` value. `syntax` is required and accepted, but typed
+  syntax validation and typed computed-value conversion are not implemented; registrations
+  currently treat every syntax as `"*"`. Registrations also apply inside matching `@media`
+  and `@layer` blocks, in `@page`, and in streaming mode.
 - The CSS-wide keywords `inherit`, `initial` and `unset` are supported on every property,
   shorthands included (#65). They used to be invalid values, so the declaration was dropped
   and an earlier declaration (or the default) stayed in effect. The common reset `html {
