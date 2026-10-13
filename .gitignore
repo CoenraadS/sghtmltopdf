@@ -2,4 +2,5 @@
 /docs/book
 /docs/po/*.po~
 /target
+/xtask/target
 CLAUDE.md

@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The repository's own tooling, run as `cargo xtask <task>` (see src/main.rs)"
+
+# A workspace of its own rather than a member of the root one. The Docker build copies only
+# the root manifest and core/, so a root workspace member it cannot see would break it.
+[workspace]
+
+[dependencies]
