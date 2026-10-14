@@ -564,6 +564,7 @@ fn place_box(
                         child.fragmentation.break_after == BreakBetween::Always,
                     )
                 },
+                |children: &[LaidOutBox], i| keep_with_next_bottom(children, i, page_height),
                 |child: &LaidOutBox| child.is_float,
                 |child: &LaidOutBox| {
                     let top = margin_box_top(child);
@@ -604,6 +605,8 @@ fn place_box(
                 // A line box has no `break-after` (the next place is always the line
                 // immediately after, and there is no cross-container sibling relationship).
                 move |i, _line| (forced_breaks[i], false),
+                // `orphans`/`widows` already decide where lines may part.
+                |_lines: &[LineBox], _i| None,
                 // A line has no concept of a float.
                 |_line: &LineBox| false,
                 |line: &LineBox| (line.rect.y, line.rect.y + line.rect.height),
@@ -632,6 +635,7 @@ fn place_box(
                 // of its items, so honouring them only when it is split would make
                 // the behaviour hard to predict.
                 |_i, _band: &FlexBand| (false, false),
+                |_bands: &[FlexBand], _i| None,
                 |_band: &FlexBand| false,
                 |band: &FlexBand| (band.top, band.bottom),
                 |band, ph, ps, c| {
@@ -651,6 +655,67 @@ fn place_box(
         new_page(state, cursor);
     }
     place_leaf(b, state, cursor);
+}
+
+/// Whether the page must not break between two adjacent in-flow siblings.
+fn avoids_break_between(before: &LaidOutBox, after: &LaidOutBox) -> bool {
+    before.fragmentation.break_after == BreakBetween::Avoid
+        || after.fragmentation.break_before == BreakBetween::Avoid
+}
+
+/// For a block child that must not be parted from the next in-flow sibling, the absolute Y of
+/// the bottom of what has to share its page: the child whole and the start of that sibling
+/// (see [`first_piece_bottom`]), continuing through any sibling that in turn avoids a break
+/// after it. `None` when the page may break after the child.
+fn keep_with_next_bottom(children: &[LaidOutBox], i: usize, page_height: f32) -> Option<f32> {
+    let next = (i + 1..children.len()).find(|&j| !children[j].is_float)?;
+    if !avoids_break_between(&children[i], &children[next]) {
+        return None;
+    }
+    Some(
+        keep_with_next_bottom(children, next, page_height)
+            .unwrap_or_else(|| first_piece_bottom(&children[next], page_height)),
+    )
+}
+
+/// The absolute Y of the bottom of the first piece of `b` the page cannot break inside: the
+/// first line (or `orphans` lines), table row or grid row, or the first child's own first
+/// piece (with the siblings it avoids a break with). A box that is not split (an image, a flex
+/// container, one with `break-inside: avoid` that fits a page) counts whole.
+fn first_piece_bottom(b: &LaidOutBox, page_height: f32) -> f32 {
+    let bottom = margin_box_top(b) + b.layout.margin_box_height();
+    if b.fragmentation.break_inside == BreakInside::Avoid
+        && b.layout.margin_box_height() <= page_height
+    {
+        return bottom;
+    }
+    match &b.content {
+        LaidOutContent::Blocks(children) => match children.iter().position(|c| !c.is_float) {
+            Some(first) => keep_with_next_bottom(children, first, page_height)
+                .unwrap_or_else(|| first_piece_bottom(&children[first], page_height)),
+            None => bottom,
+        },
+        LaidOutContent::Table(table) => table
+            .rows
+            .iter()
+            .find(|row| row.section != TableSection::Head)
+            .or(table.rows.first())
+            .map(table_row_bottom)
+            .unwrap_or(bottom),
+        LaidOutContent::Grid(grid) if grid.rows.len() > 1 => grid.rows[0].bottom,
+        // Lines too few for `orphans` and `widows` are moved whole, like a single line.
+        LaidOutContent::Inline(lines)
+            if lines.len() > 1
+                && lines.len() >= (b.fragmentation.orphans + b.fragmentation.widows) as usize =>
+        {
+            let line = &lines[(b.fragmentation.orphans as usize).max(1) - 1];
+            line.rect.y + line.rect.height
+        }
+        LaidOutContent::Grid(_)
+        | LaidOutContent::Inline(_)
+        | LaidOutContent::Flex(_)
+        | LaidOutContent::Image(_) => bottom,
+    }
 }
 
 /// The absolute Y of the top of `b`'s margin box (its `content.y` minus the margin, border
@@ -787,6 +852,12 @@ fn compute_orphans_widows_breaks(
 /// `break-before`/`break-after`, so the caller passes a callback indexing into an array
 /// precomputed from `orphans`/`widows`).
 ///
+/// `keep_with_next` returns, for an item that must not be parted from the next in-flow one
+/// (`break-after: avoid` on it or `break-before: avoid` on the next), the absolute Y of the
+/// bottom of what has to share its page (see [`keep_with_next_bottom`]); `None` otherwise.
+/// When the item fits on the current page but that does not, the page is broken before the
+/// item instead, as long as the two fit on a page together.
+///
 /// `is_float`/`item_margin_box_top` are callbacks for identifying out-of-flow elements
 /// (`float`) among `items` (the `LineBox` side passes dummy implementations always returning
 /// `false`/`0.0`; a line has no concept of a float). A float item does not change the shared
@@ -831,6 +902,7 @@ fn place_split<T>(
     state: &mut PaginationState<'_>,
     cursor: &mut f32,
     break_hints: impl Fn(usize, &T) -> (bool, bool),
+    keep_with_next: impl Fn(&[T], usize) -> Option<f32>,
     is_float: impl Fn(&T) -> bool,
     item_extent: impl Fn(&T) -> (f32, f32),
     place_one: impl Fn(&mut T, f32, &mut PaginationState<'_>, &mut f32),
@@ -904,7 +976,9 @@ fn place_split<T>(
     // previous page. The next item goes to the top of the new one, so it is
     // derived again before use.
     let mut forced_page_start = false;
-    for (i, item) in items.iter_mut().enumerate() {
+    for i in 0..item_count {
+        let keep_bottom = keep_with_next(items, i);
+        let item = &mut items[i];
         let (breaks_before, breaks_after) = break_hints(i, item);
         // If nothing has actually been placed on the current page (including the
         // case where `cursor` has only moved by an ancestor's margin), breaking
@@ -932,6 +1006,21 @@ fn place_split<T>(
             if forced_page_start {
                 shift_reference = item_extent(item).0 - *cursor;
                 forced_page_start = false;
+            }
+            // `break-after: avoid` (or `break-before: avoid` on the next item): the item fits
+            // here, but the start of what follows it does not, so the two would be parted.
+            // Move the item to the next page with it, unless the page holds nothing yet (the
+            // break would gain nothing) or the two do not fit on a page together either.
+            if let Some(keep_bottom) = keep_bottom {
+                let (top, bottom) = item_extent(item);
+                if bottom - shift_reference <= page_height
+                    && keep_bottom - shift_reference > page_height
+                    && keep_bottom - top <= page_height
+                    && current_page_has_content(state)
+                {
+                    force_new_page(state, cursor, &mut current_page, &mut segments);
+                    shift_reference = top - *cursor;
+                }
             }
             // Nothing above the top of the page is painted, so stop at 0.
             *cursor = (item_extent(item).0 - shift_reference).max(0.0);
@@ -2183,6 +2272,118 @@ mod tests {
             );
             assert!(!page_contains_content(&pages[0], p));
         }
+    }
+
+    /// Paginates `body` under `css` on the default page, after a filler that leaves `room` px
+    /// of the first page free.
+    fn paginate_after_filler(room: f32, body: &str, css: &str) -> (Dom, Vec<Page>) {
+        let settings = PageSettings::default();
+        let filler_height = settings.content_height() - room;
+        let dom = html::parse(format!(r#"<div class="filler"></div>{body}"#).as_bytes());
+        let ua = user_agent_stylesheet();
+        let author = parse_stylesheet(&format!(
+            ".filler {{ height: {filler_height}px; margin: 0; }} \
+             h2, p, table {{ margin: 0; }} h2 {{ height: 40px; }} p {{ height: 100px; }} {css}"
+        ));
+        let styles = compute_styles(&dom, &ua, &author);
+        let pages = paginate_document(&dom, &styles, &test_fonts(), &settings);
+        (dom, pages)
+    }
+
+    /// The index of the page each `tag` element is placed on.
+    fn pages_of(dom: &Dom, pages: &[Page], tag: &str) -> Vec<usize> {
+        let mut nodes = Vec::new();
+        find_all(dom, dom.document(), tag, &mut nodes);
+        nodes
+            .iter()
+            .map(|&node| {
+                pages
+                    .iter()
+                    .position(|page| page_contains_content(page, node))
+                    .expect("every element is placed on a page")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn break_after_avoid_moves_a_heading_the_next_block_does_not_fit_under() {
+        let (dom, pages) = paginate_after_filler(
+            60.0,
+            "<section><h2>Heading</h2><p>Body</p></section>",
+            "h2 { break-after: avoid; }",
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![1]);
+        assert_eq!(pages_of(&dom, &pages, "p"), vec![1]);
+    }
+
+    #[test]
+    fn a_heading_without_break_after_avoid_stays_at_the_foot_of_the_page() {
+        let (dom, pages) =
+            paginate_after_filler(60.0, "<section><h2>Heading</h2><p>Body</p></section>", "");
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![0]);
+        assert_eq!(pages_of(&dom, &pages, "p"), vec![1]);
+    }
+
+    #[test]
+    fn break_after_avoid_keeps_a_heading_in_place_when_the_next_block_fits_under_it() {
+        let (dom, pages) = paginate_after_filler(
+            200.0,
+            "<section><h2>Heading</h2><p>Body</p><p>More</p></section>",
+            "h2 { break-after: avoid; }",
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![0]);
+        assert_eq!(pages_of(&dom, &pages, "p"), vec![0, 1]);
+    }
+
+    #[test]
+    fn break_before_avoid_on_the_next_block_moves_the_heading_too() {
+        let (dom, pages) = paginate_after_filler(
+            60.0,
+            "<section><h2>Heading</h2><p>Body</p></section>",
+            "p { break-before: avoid; }",
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![1]);
+    }
+
+    #[test]
+    fn break_after_avoid_moves_stacked_headings_together() {
+        // A list heading, then a nested item heading, then the item's body: there is room
+        // for both headings but not the body, so both move with it.
+        let (dom, pages) = paginate_after_filler(
+            100.0,
+            "<section><h2>List</h2><div><div><h2>Item</h2><p>Body</p></div></div></section>",
+            "h2 { break-after: avoid; } div { margin: 0; }",
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![1, 1]);
+        assert_eq!(pages_of(&dom, &pages, "p"), vec![1]);
+    }
+
+    #[test]
+    fn break_after_avoid_keeps_a_heading_with_the_first_row_of_a_table() {
+        let mut rows = String::new();
+        for i in 0..20 {
+            rows.push_str(&format!("<tr><td>row {i}</td></tr>"));
+        }
+        let (dom, pages) = paginate_after_filler(
+            60.0,
+            &format!("<section><h2>Heading</h2><table>{rows}</table></section>"),
+            "h2 { break-after: avoid; } td { height: 30px; padding: 0; }",
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![1]);
+        // The table starts on the page the heading moved to (its first row is there).
+        assert_eq!(pages_of(&dom, &pages, "table"), vec![1]);
+    }
+
+    #[test]
+    fn break_after_avoid_gives_up_when_the_heading_and_the_next_block_do_not_fit_a_page() {
+        let settings = PageSettings::default();
+        let tall = settings.content_height();
+        let (dom, pages) = paginate_after_filler(
+            60.0,
+            "<section><h2>Heading</h2><p>Body</p></section>",
+            &format!("h2 {{ break-after: avoid; }} p {{ height: {tall}px; }}"),
+        );
+        assert_eq!(pages_of(&dom, &pages, "h2"), vec![0]);
     }
 
     #[test]
