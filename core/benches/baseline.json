@@ -25,13 +25,13 @@
     },
     {
       "name": "engine/batch/block_layout",
-      "seconds": 0.013296917,
-      "peak_rss_bytes": 31883264,
-      "alloc_count": 165646,
-      "alloc_bytes": 51464428,
-      "peak_live_bytes": 25040730,
+      "seconds": 0.012878208,
+      "peak_rss_bytes": 32800768,
+      "alloc_count": 165674,
+      "alloc_bytes": 51557456,
+      "peak_live_bytes": 25064378,
       "pages": 12,
-      "pdf_bytes": 112704
+      "pdf_bytes": 121309
     },
     {
       "name": "engine/batch/flexbox",
@@ -185,13 +185,13 @@
     },
     {
       "name": "engine/streaming/block_layout",
-      "seconds": 0.011912875,
-      "peak_rss_bytes": 30457856,
-      "alloc_count": 115193,
-      "alloc_bytes": 49753761,
-      "peak_live_bytes": 24425151,
+      "seconds": 0.011566083,
+      "peak_rss_bytes": 31326208,
+      "alloc_count": 115221,
+      "alloc_bytes": 49842942,
+      "peak_live_bytes": 24446123,
       "pages": 12,
-      "pdf_bytes": 110216
+      "pdf_bytes": 118522
     },
     {
       "name": "engine/streaming/flexbox",

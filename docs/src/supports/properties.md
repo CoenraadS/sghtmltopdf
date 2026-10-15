@@ -58,7 +58,7 @@
 | `outline` | ✅ | `<width> \|\| <style> \|\| <color>`。border-boxの外側に描画し、レイアウトには影響しない |
 | `outline-width` / `outline-style` / `outline-color` | ⚠️ | `outline-style`は`border-style`と同じ値集合。UA依存の`auto`は非対応 |
 | `outline-offset` | ❌ | 常に0固定 |
-| `box-shadow` | ⚠️ | `none \| <shadow>#`(カンマ区切りで複数指定可、先頭が最前面)。`inset`はパースするが描画は非対応。ぼかしは4段階の同心矩形による近似 |
+| `box-shadow` | ⚠️ | `none \| <shadow>#`(カンマ区切りで複数指定可、先頭が最前面)。`inset`はパースするが描画は非対応。外側の影はborder-boxの外側にだけ描画し、border-box(`border-radius`の角丸を含む)の内側は切り抜く。`spread`に合わせて角の半径も広がる。ぼかしは影の縁の内外`blur`の幅にわたる直線的な減衰を、重ならない8段階の帯で近似。アルファは0.05刻みに丸めるため、0.025未満の色の影は描画されない |
 
 ## 配置(positioning / float / transform)
 
