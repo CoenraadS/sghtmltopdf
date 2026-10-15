@@ -1296,6 +1296,11 @@ fn place_grid(
             // so that pagination keeps moving forward.
             if row.bottom - shift > page_height && current_page_has_content(state) {
                 new_page(state, cursor);
+                // Still the first fragment: its top margin, border and padding were reserved
+                // on the page just left, so reserve them again on this one.
+                if is_first_fragment {
+                    *cursor += top_extra;
+                }
                 fragment_top = *cursor;
                 shift = row.top - *cursor;
             }
@@ -1541,6 +1546,11 @@ fn place_table(
             // not fit in what is left (the caption height counts towards it).
             if row_bottom - shift > page_height && current_page_has_content(state) {
                 new_page(state, cursor);
+                // Still the first fragment: reserve its top margin, border and padding again
+                // (as in `place_grid`).
+                if is_first_fragment {
+                    *cursor += top_extra;
+                }
                 let (top, s) = start_new_fragment(cursor, row_top, extra_above);
                 fragment_top = top;
                 shift = s;
@@ -3314,7 +3324,7 @@ mod tests {
     }
 
     /// Paginate `body` onto 400x200 pages with no page margin and return, page by page, the
-    /// layout of the grid or table fragment found there.
+    /// layout of the grid or table fragment found there (pages without one are skipped).
     fn row_container_fragments(body: &str, css: &str) -> Vec<Layout> {
         fn find(b: &LaidOutBox) -> Option<Layout> {
             match &b.content {
@@ -3338,12 +3348,7 @@ mod tests {
         let pages = paginate_document(&dom, &styles, &test_fonts(), &settings);
         pages
             .iter()
-            .map(|page| {
-                page.boxes
-                    .iter()
-                    .find_map(find)
-                    .expect("a fragment on every page")
-            })
+            .filter_map(|page| page.boxes.iter().find_map(find))
             .collect()
     }
 
@@ -3391,5 +3396,41 @@ mod tests {
              td { height: 50px; padding: 0; }",
         );
         assert_sliced(&fragments);
+    }
+
+    /// A grid or table whose first row does not fit below what precedes it starts on the next
+    /// page. Its first fragment is still the one carrying the top border and padding, so they
+    /// are reserved again there: the border box starts at the top of the page, and the first
+    /// row below them.
+    fn assert_first_fragment_moved_whole(fragments: &[Layout]) {
+        assert_eq!(fragments[0].fragment, FragmentPosition::First);
+        assert_eq!(
+            fragments[0].border_box().y,
+            0.0,
+            "the top border is off the page"
+        );
+        assert_eq!(fragments[0].content.y, 7.0);
+    }
+
+    #[test]
+    fn a_grid_moved_to_the_next_page_keeps_its_top_border_on_the_page() {
+        let rows = r#"<div class="row"></div>"#.repeat(8);
+        let fragments = row_container_fragments(
+            &format!(r#"<div style="height:170px"></div><div class="grid">{rows}</div>"#),
+            ".grid { display: grid; border: 4px solid black; padding: 3px 0; } \
+             .row { height: 50px; }",
+        );
+        assert_first_fragment_moved_whole(&fragments);
+    }
+
+    #[test]
+    fn a_table_moved_to_the_next_page_keeps_its_top_border_on_the_page() {
+        let rows = "<tr><td></td></tr>".repeat(8);
+        let fragments = row_container_fragments(
+            &format!(r#"<div style="height:170px"></div><table>{rows}</table>"#),
+            "table { border: 4px solid black; padding: 3px 0; border-spacing: 0; } \
+             td { height: 50px; padding: 0; }",
+        );
+        assert_first_fragment_moved_whole(&fragments);
     }
 }
