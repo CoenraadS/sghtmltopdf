@@ -802,6 +802,8 @@ fn append_user_stylesheets(ua: &mut Stylesheet, user_css: &[String]) {
     for css in user_css {
         let sheet = crate::style::parse_stylesheet(css);
         ua.rules.extend(sheet.rules);
+        ua.property_registrations
+            .extend(sheet.property_registrations);
     }
 }
 
