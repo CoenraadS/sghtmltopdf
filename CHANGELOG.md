@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An outer `box-shadow` is drawn outside the border box only, so a box with no background
+  no longer shows the shadow's colour across its interior (#105). The shadow used to be
+  painted as filled rectangles under the whole box, and its blur rings were filled on top of
+  each other, so `0 4px 6px 0 rgb(0 0 0 / 0.1)` turned the middle of a transparent box
+  `rgb(167,167,167)` and the edge outside it was also two to three times darker than the
+  colour. The shadow is now clipped inside the border box, following its `border-radius`,
+  and the blur is a ramp of non-overlapping bands from `blur-radius` inside the shadow's
+  edge to `blur-radius` outside it. `spread-radius` grows the corner radii, and a shadow
+  whose colour rounds to transparent (Tailwind's `0 0 #0000` layers) draws nothing.
 - `:host` and `:host()` parse as pseudo-classes that never match, so a selector list that names
   one is no longer dropped (#102). Tailwind v4 declares its whole theme on `:root, :host` and
   its preflight on `html, :host`; since custom properties cascade (#75), the theme rule never

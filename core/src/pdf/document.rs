@@ -1921,11 +1921,14 @@ fn render_box_decoration(
     render_border(content, layout, style, settings);
 }
 
-/// The number of steps in the blur approximation.
-const BOX_SHADOW_BLUR_STEPS: u32 = 4;
+/// The number of bands in the blur approximation.
+const BOX_SHADOW_BLUR_STEPS: u32 = 8;
 
 /// Draw the `box-shadow`s (call before the element's own background and borders). They are
-/// painted back to front so the first in the list ends up frontmost. `inset` is not supported.
+/// painted back to front so the first in the list ends up frontmost. An outer shadow is drawn
+/// outside the border edge only: it is clipped inside the border box, rounded by its
+/// `border-radius` (CSS Backgrounds 3, 7.1), so a box without a background shows what is
+/// behind it rather than the shadow. `inset` is not supported.
 fn render_box_shadows(
     content: &mut RenderTarget<'_>,
     layout: &Layout,
@@ -1939,23 +1942,55 @@ fn render_box_shadows(
     ),
     alpha_gs_names: &[String],
 ) {
-    if style.box_shadow.is_empty() {
+    // A shadow whose alpha rounds to 0 draws nothing, such as Tailwind's `0 0 #0000` layers.
+    let shadows: Vec<&ComputedBoxShadow> = style
+        .box_shadow
+        .iter()
+        .filter(|shadow| !shadow.inset && quantize_alpha_step(shadow.color.alpha) > 0)
+        .collect();
+    if shadows.is_empty() {
         return;
     }
     let border_box = layout.border_box();
-    for shadow in style.box_shadow.iter().rev() {
-        if shadow.inset {
-            continue;
-        }
+    let x0 = settings.margin.left + border_box.x;
+    let x1 = x0 + border_box.width;
+    let y_top = to_pdf_y(settings, border_box.y);
+    let y_bottom = to_pdf_y(settings, border_box.y + border_box.height);
+    // The clip is a rectangle reaching past every shadow with the border box cut out of it
+    // (even-odd).
+    let reach = shadows
+        .iter()
+        .map(|shadow| {
+            shadow.offset_x.abs().max(shadow.offset_y.abs())
+                + shadow.spread_radius.max(0.0)
+                + shadow.blur_radius
+        })
+        .fold(0.0, f32::max)
+        + 1.0;
+    content.save_state();
+    content.rect(
+        x0 - reach,
+        y_bottom - reach,
+        x1 - x0 + 2.0 * reach,
+        y_top - y_bottom + 2.0 * reach,
+    );
+    rounded_rect_path(content, x0, y_top, x1, y_bottom, radii);
+    content.clip_even_odd();
+    content.end_path();
+    for shadow in shadows.into_iter().rev() {
         render_single_box_shadow(content, border_box, shadow, settings, radii, alpha_gs_names);
     }
+    content.restore_state();
 }
 
-/// Draw one shadow. The blur is not a true Gaussian: it is approximated by overpainting
-/// concentric semi-transparent rectangles outside a core rectangle expanded by
-/// `spread-radius`, spreading out to `blur-radius` in `BOX_SHADOW_BLUR_STEPS` even steps,
-/// from the outermost (widest and faintest) to the innermost (closest to the core and
-/// strongest). The corner radii use the element's own (`radii`) unchanged, without growing.
+/// Draw one outer shadow. The shadow shape is the border box moved by the offset and grown by
+/// `spread-radius`, with its corner radii grown as the spec describes ([`spread_radii`]).
+/// The blur is not a true Gaussian: the edge is approximated by a linear ramp from the full
+/// colour at `blur-radius` inside the shape's edge to nothing at `blur-radius` outside it,
+/// about where the spec's Gaussian (standard deviation half the blur radius) fades out. The
+/// ramp is drawn as `BOX_SHADOW_BLUR_STEPS` bands of even width around a core. Each band is
+/// filled even-odd between its two outlines, so no point is painted twice and the shadow is
+/// never darker than its colour.
 fn render_single_box_shadow(
     content: &mut RenderTarget<'_>,
     border_box: Rect,
@@ -1969,11 +2004,11 @@ fn render_single_box_shadow(
     ),
     alpha_gs_names: &[String],
 ) {
-    if shadow.color.alpha <= 0.0 {
-        return;
-    }
-
-    let draw = |content: &mut RenderTarget<'_>, expand: f32, alpha: f32| {
+    let shape_radii = spread_radii(radii, shadow.spread_radius);
+    // The outline `grow` px outside the shadow shape's edge (inside it when negative), or
+    // `None` when a negative `spread-radius` or the blur's inner half leaves nothing of it.
+    let outline = |grow: f32| {
+        let expand = shadow.spread_radius + grow;
         let x0 = settings.margin.left + border_box.x + shadow.offset_x - expand;
         let x1 = settings.margin.left + border_box.x + border_box.width + shadow.offset_x + expand;
         let y_top = to_pdf_y(settings, border_box.y + shadow.offset_y - expand);
@@ -1981,11 +2016,17 @@ fn render_single_box_shadow(
             settings,
             border_box.y + border_box.height + shadow.offset_y + expand,
         );
-        // A known simplification: where a negative `spread-radius` degenerates the rectangle,
-        // that ring is not drawn (a zero or negative sized rectangle being meaningless).
-        if x1 <= x0 || y_top <= y_bottom {
+        (x1 > x0 && y_top > y_bottom)
+            .then(|| (x0, y_top, x1, y_bottom, grow_radii(shape_radii, grow)))
+    };
+    // Fill between the outlines at `outer` and `inner`, or all of `outer` with no `inner`.
+    let fill = |content: &mut RenderTarget<'_>, outer: f32, inner: Option<f32>, alpha: f32| {
+        if quantize_alpha_step(alpha) == 0 {
             return;
         }
+        let Some((x0, y_top, x1, y_bottom, outer_radii)) = outline(outer) else {
+            return;
+        };
         let use_alpha = alpha < 1.0;
         if use_alpha {
             content.save_state();
@@ -1996,28 +2037,93 @@ fn render_single_box_shadow(
             shadow.color.green as f32 / 255.0,
             shadow.color.blue as f32 / 255.0,
         );
-        rounded_rect_path(content, x0, y_top, x1, y_bottom, radii);
-        content.fill_nonzero();
+        rounded_rect_path(content, x0, y_top, x1, y_bottom, outer_radii);
+        if let Some((x0, y_top, x1, y_bottom, inner_radii)) = inner.and_then(outline) {
+            rounded_rect_path(content, x0, y_top, x1, y_bottom, inner_radii);
+            content.fill_even_odd();
+        } else {
+            content.fill_nonzero();
+        }
         if use_alpha {
             content.restore_state();
         }
     };
 
     if shadow.blur_radius <= 0.0 {
-        draw(content, shadow.spread_radius, shadow.color.alpha);
+        fill(content, 0.0, None, shadow.color.alpha);
         return;
     }
 
-    for step in (1..=BOX_SHADOW_BLUR_STEPS).rev() {
-        let expand =
-            shadow.spread_radius + shadow.blur_radius * step as f32 / BOX_SHADOW_BLUR_STEPS as f32;
-        let alpha = shadow.color.alpha * (BOX_SHADOW_BLUR_STEPS + 1 - step) as f32
-            / BOX_SHADOW_BLUR_STEPS as f32;
-        draw(content, expand, alpha);
+    let blur = shadow.blur_radius;
+    let band = 2.0 * blur / BOX_SHADOW_BLUR_STEPS as f32;
+    fill(content, -blur, None, shadow.color.alpha);
+    for step in 0..BOX_SHADOW_BLUR_STEPS {
+        let inner = -blur + band * step as f32;
+        // The ramp's value at the middle of the band.
+        let alpha = shadow.color.alpha * (1.0 - (step as f32 + 0.5) / BOX_SHADOW_BLUR_STEPS as f32);
+        fill(content, inner + band, Some(inner), alpha);
     }
-    // The core (spread only, at full alpha) is overpainted last, so the outline matches the
-    // blur-radius: 0 case exactly.
-    draw(content, shadow.spread_radius, shadow.color.alpha);
+}
+
+/// The corner radii of a shadow shape grown by `spread` (CSS Backgrounds 3, 7.1.1). A
+/// positive spread is added to each radius, except that a radius smaller than the spread
+/// takes only `1 + (r - 1)^3` of it, `r` being the ratio of the radius to the spread, so a
+/// square corner stays square. A negative spread shrinks the radii.
+fn spread_radii(
+    radii: (
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+    ),
+    spread: f32,
+) -> (
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+) {
+    let one = |r: f32| {
+        if spread > 0.0 && r < spread {
+            let ratio = r / spread;
+            r + spread * (1.0 + (ratio - 1.0).powi(3))
+        } else {
+            (r + spread).max(0.0)
+        }
+    };
+    let corner = |(rx, ry): CornerRadiusPx| (one(rx), one(ry));
+    (
+        corner(radii.0),
+        corner(radii.1),
+        corner(radii.2),
+        corner(radii.3),
+    )
+}
+
+/// The corner radii of an outline `grow` px outside a rounded shape (inside it when
+/// negative). A rounded corner follows the outline; a square corner stays square.
+fn grow_radii(
+    radii: (
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+    ),
+    grow: f32,
+) -> (
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+) {
+    let one = |r: f32| if r > 0.0 { (r + grow).max(0.0) } else { 0.0 };
+    let corner = |(rx, ry): CornerRadiusPx| (one(rx), one(ry));
+    (
+        corner(radii.0),
+        corner(radii.1),
+        corner(radii.2),
+        corner(radii.3),
+    )
 }
 
 /// The effective radii of one corner as px values (horizontal, vertical). A true circle has the two equal.
@@ -4725,6 +4831,25 @@ mod tests {
 
         let bytes = encode_pdf(&pages, &styles, &HashMap::new(), &fonts, &settings);
         assert_eq!(count_occurrences(&bytes, b"/MediaBox"), pages.len());
+    }
+
+    #[test]
+    fn spread_radii_grow_a_box_shadow_shape_as_the_spec_describes() {
+        let radii = ((0.0, 0.0), (10.0, 10.0), (2.0, 6.0), (8.0, 8.0));
+        let (tl, tr, br, bl) = spread_radii(radii, 4.0);
+        // A square corner stays square.
+        assert_eq!(tl, (0.0, 0.0));
+        // A radius at least the spread grows by the spread.
+        assert_eq!(tr, (14.0, 14.0));
+        assert_eq!(bl, (12.0, 12.0));
+        // A smaller one by 1 + (r - 1)^3 of it: r = 0.5 gives 0.875.
+        assert_eq!(br, (2.0 + 4.0 * 0.875, 10.0));
+        // A negative spread shrinks them, down to square.
+        let (tl, tr, br, bl) = spread_radii(radii, -4.0);
+        assert_eq!(
+            [tl, tr, br, bl],
+            [(0.0, 0.0), (6.0, 6.0), (0.0, 2.0), (4.0, 4.0)]
+        );
     }
 
     #[test]
