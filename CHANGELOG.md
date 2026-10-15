@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `break-after: avoid` and `break-before: avoid` are honoured between block siblings. They
+  were parsed but never consulted, so a heading could still end a page with its content
+  starting on the next, although the pagination docs suggest exactly this rule for it. When a
+  box with `break-after: avoid` (or followed by one with `break-before: avoid`) fits on the
+  page but the start of the next sibling does not, the page now breaks before the box. The
+  start of the next sibling is its first line (`orphans` lines), table row or grid row, its
+  first child's start, or the whole box when it is not split, and runs on through further
+  siblings that avoid a break, so a heading followed by a nested heading moves with both.
+  The break is kept when the two do not fit on a page together, or when the box is already
+  at the top of a page. Not covered: the elements directly under `<body>` in streaming mode,
+  which are paginated one at a time.
 - A `background-color` on `<thead>`, `<tbody>` or `<tfoot>` (or their `bgcolor` attribute) is
   painted (#106). The row groups were not boxes of their own, so nothing drew them, and
   Tailwind's `<tbody class="bg-white">` and `<thead class="bg-gray-50">` showed the colour

@@ -161,7 +161,7 @@
       "alloc_bytes": 73593372,
       "peak_live_bytes": 26166924,
       "pages": 20,
-      "pdf_bytes": 161326
+      "pdf_bytes": 161639
     },
     {
       "name": "engine/streaming/text_inline",
@@ -471,7 +471,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 20,
-      "pdf_bytes": 161326
+      "pdf_bytes": 161639
     },
     {
       "name": "cli/report_streaming",
@@ -491,7 +491,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 23,
-      "pdf_bytes": 179008
+      "pdf_bytes": 179321
     },
     {
       "name": "cli/report_header_footer_html",
@@ -501,7 +501,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 20,
-      "pdf_bytes": 166513
+      "pdf_bytes": 166826
     },
     {
       "name": "cli/report_cover",
@@ -511,7 +511,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 21,
-      "pdf_bytes": 163099
+      "pdf_bytes": 163412
     },
     {
       "name": "cli/invoice",
