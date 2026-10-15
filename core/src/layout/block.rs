@@ -49,6 +49,9 @@ pub struct LaidOutBox {
     /// `pdf::document::render_line` is reused unchanged to draw it.
     /// When pagination splits this box across pages, it is kept only on the first fragment (`paginate.rs`).
     pub marker: Option<Box<LineBox>>,
+    /// The href when this is an `<a href>` element's own box (see [`super::box_tree::LayoutBox::link`]).
+    /// Its border box, on every page it is split across, becomes the link area.
+    pub link: Option<Rc<str>>,
 }
 
 /// The CSS Fragmentation computed values carried by a [`LaidOutBox`].
@@ -947,6 +950,7 @@ fn layout_box_impl(
         is_float: style.float != Float::None,
         content,
         marker,
+        link: b.link.clone(),
     };
     if offset_x != 0.0 {
         shift_box_x_in_place(&mut laid, offset_x);

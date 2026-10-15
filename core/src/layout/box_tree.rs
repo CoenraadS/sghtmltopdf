@@ -29,6 +29,10 @@ pub struct LayoutBox {
     /// (to avoid drawing it twice). Otherwise (`outside`, or an `inside` with block
     /// children) the layout layer (`block.rs`) reads this field and places it separately.
     pub marker: Option<String>,
+    /// The href when this box is an `<a href>` element's own box (`display: block`, `flex`,
+    /// `inline-block` and so on, or a flex or grid item). The whole box becomes the link
+    /// area. An inline `<a>` makes no box: its href is carried on its spans instead.
+    pub link: Option<Rc<str>>,
     /// Memoised measurements. See [`MeasureMemo`].
     pub measured: MeasureMemo,
 }
@@ -40,6 +44,7 @@ impl LayoutBox {
             node: None,
             content,
             marker: None,
+            link: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -50,6 +55,7 @@ impl LayoutBox {
             node: Some(node),
             content,
             marker: None,
+            link: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -295,15 +301,16 @@ impl InlineSpan {
         }
     }
 
-    /// An atomic box for `display: inline-block`.
-    fn atomic(node: NodeId, atomic: LayoutBox) -> Self {
+    /// An atomic box for `display: inline-block`, carrying the link of an enclosing inline
+    /// `<a href>` (an `<img>` inside a link, say).
+    fn atomic(node: NodeId, atomic: LayoutBox, context: &InlineContext) -> Self {
         Self {
             node,
             text: String::new(),
             is_first_letter: false,
             is_forced_break: false,
             atomic: Some(Box::new(atomic)),
-            link: None,
+            link: context.link.clone(),
             background_color: RgbaColor::TRANSPARENT,
             relative_insets: Vec::new(),
         }
@@ -379,6 +386,24 @@ pub(crate) fn build_box_for_element(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
 ) -> Option<LayoutBox> {
+    let mut b = build_element_box(dom, styles, node)?;
+    // An inline `<a>` reaches here only as a top-level element in streaming mode. Its href is
+    // already on the spans (`build_element_box`), so the area hugs the text rather than the
+    // whole width of the box.
+    let link_on_spans = styles.get(&node).map(|s| s.display) == Some(Display::Inline)
+        && matches!(b.content, BoxContent::Inline(_));
+    if !link_on_spans {
+        b.link = link_href(dom, node);
+    }
+    Some(b)
+}
+
+/// The body of [`build_box_for_element`], everything but the link.
+fn build_element_box(
+    dom: &Dom,
+    styles: &HashMap<NodeId, Rc<ComputedStyle>>,
+    node: NodeId,
+) -> Option<LayoutBox> {
     let style = styles.get(&node)?;
     if style.display == Display::None {
         return None;
@@ -426,11 +451,21 @@ pub(crate) fn build_box_for_element(
             list_item_start,
         ))
     } else {
+        // An inline `<a>` (a top-level element in streaming mode) carries its href down to
+        // its text, as it would inside a line.
+        let context = InlineContext {
+            link: (style.display == Display::Inline)
+                .then(|| link_href(dom, node))
+                .flatten(),
+            ..InlineContext::default()
+        };
         let mut spans = Vec::new();
         push_before_content(styles, node, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
-                ChildKind::Inline => collect_spans(dom, styles, child, &mut spans),
+                ChildKind::Inline => {
+                    collect_spans_in_context(dom, styles, child, &context, &mut spans)
+                }
                 ChildKind::Whitespace => {
                     push_collapsible_whitespace(dom, styles, child, &mut spans)
                 }
@@ -967,7 +1002,9 @@ fn build_inline_block_box(
         BoxContent::Inline(spans)
     };
 
-    Some(LayoutBox::for_node(node, content))
+    let mut b = LayoutBox::for_node(node, content);
+    b.link = link_href(dom, node);
+    Some(b)
 }
 
 /// If `node` is an `<a>` element with an `href`, its value.
@@ -1445,6 +1482,7 @@ fn collect_spans_in_context(
                 out.push(InlineSpan::atomic(
                     node,
                     LayoutBox::for_node(node, BoxContent::Inline(Vec::new())),
+                    context,
                 ));
                 return;
             }
@@ -1454,7 +1492,7 @@ fn collect_spans_in_context(
             if styles.get(&node).map(|s| s.display) == Some(Display::InlineFlex) {
                 if let Some(mut atomic) = build_box_for_element(dom, styles, node) {
                     atomic.marker = None;
-                    out.push(InlineSpan::atomic(node, atomic));
+                    out.push(InlineSpan::atomic(node, atomic, context));
                 }
                 return;
             }
@@ -1463,7 +1501,7 @@ fn collect_spans_in_context(
             if styles.get(&node).map(|s| s.display) == Some(Display::InlineBlock) {
                 if let Some(mut atomic) = build_inline_block_box(dom, styles, node) {
                     atomic.marker = None;
-                    out.push(InlineSpan::atomic(node, atomic));
+                    out.push(InlineSpan::atomic(node, atomic, context));
                 }
                 return;
             }

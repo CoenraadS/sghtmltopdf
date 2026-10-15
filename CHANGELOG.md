@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An `<a href>` that generates a box of its own is now a clickable link (#113). Only text
+  inside an inline `<a>` was linked, so an anchor with `display: block`, `flex`,
+  `inline-block` or `inline-flex`, or one that is a flex or grid item (Tailwind's
+  `<a class="flex ...">`, a link in a flex banner), was drawn without a link annotation. Such
+  an anchor is linked over its border box, on every page it is split across. An `<img>` or
+  `inline-block` box inside an inline `<a>` (`<a href><img></a>`) is linked too, merged with
+  the link's text on the same line. In streaming mode, an inline `<a>` directly under
+  `<body>` gets a link as well.
 - `break-after: avoid` and `break-before: avoid` are honoured between block siblings. They
   were parsed but never consulted, so a heading could still end a page with its content
   starting on the next, although the pagination docs suggest exactly this rule for it. When a
