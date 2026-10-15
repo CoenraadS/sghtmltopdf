@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `background-color` on `<thead>`, `<tbody>` or `<tfoot>` (or their `bgcolor` attribute) is
+  painted (#106). The row groups were not boxes of their own, so nothing drew them, and
+  Tailwind's `<tbody class="bg-white">` and `<thead class="bg-gray-50">` showed the colour
+  behind the table instead. The row group is painted behind its rows and cells (CSS2.1
+  17.5.1), over each of its cells, so `border-spacing` gaps show the table's background. When
+  a table splits across pages, each page's fragment covers only its own rows. A
+  `background-image` on a row group and backgrounds on `<colgroup>`/`<col>` are still not
+  painted.
 - An outer `box-shadow` is drawn outside the border box only, so a box with no background
   no longer shows the shadow's colour across its interior (#105). The shadow used to be
   painted as filled rectangles under the whole box, and its blur rings were filled on top of

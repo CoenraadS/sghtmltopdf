@@ -1599,6 +1599,9 @@ fn render_box_with_style_inner(
             } else {
                 Vec::new()
             };
+            // Row groups are the layer below rows and cells (CSS2.1 17.5.1), so every group is
+            // painted before the first row.
+            render_row_group_backgrounds(content, &table.rows, styles, settings, alpha_gs_names);
             for row in &table.rows {
                 render_row_background(content, row, styles, settings, alpha_gs_names);
                 for cell in &row.cells {
@@ -2556,6 +2559,58 @@ fn render_row_background(
     content.fill_nonzero();
     if use_alpha {
         content.restore_state();
+    }
+}
+
+/// Paint the `background-color` of each `<thead>`/`<tbody>`/`<tfoot>` behind the cells of its
+/// rows (CSS2.1 17.5.1, layer 3 of 6).
+///
+/// Each cell's border box is filled rather than the union of the rows: with
+/// `border-collapse: separate`, the `border-spacing` gaps always show the table's background.
+/// On a page fragment `rows` holds only the rows placed on that page (plus the repeated
+/// `<thead>` rows), so the fill covers only those.
+fn render_row_group_backgrounds(
+    content: &mut RenderTarget<'_>,
+    rows: &[LaidOutTableRow],
+    styles: &HashMap<NodeId, Rc<ComputedStyle>>,
+    settings: &PageSettings,
+    alpha_gs_names: &[String],
+) {
+    // The rows of a group are consecutive, so each run sharing a `group` is one fill.
+    for run in rows.chunk_by(|a, b| a.group == b.group) {
+        let Some(style) = run[0].group.and_then(|node| styles.get(&node)) else {
+            continue;
+        };
+        let color = style.background_color;
+        let cells: Vec<Rect> = run
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| cell.layout.border_box())
+            .filter(|b| b.width > 0.0 && b.height > 0.0)
+            .collect();
+        if color.alpha <= 0.0 || cells.is_empty() {
+            continue;
+        }
+        let use_alpha = color.alpha < 1.0;
+        if use_alpha {
+            content.save_state();
+            apply_fill_alpha(content, color.alpha, alpha_gs_names);
+        }
+        content.set_fill_rgb(
+            color.red as f32 / 255.0,
+            color.green as f32 / 255.0,
+            color.blue as f32 / 255.0,
+        );
+        // All the cells go into one path and one fill, so a translucent colour is not doubled
+        // where collapsed borders make neighbouring cells overlap.
+        for b in cells {
+            let y_bottom = to_pdf_y(settings, b.y + b.height);
+            content.rect(settings.margin.left + b.x, y_bottom, b.width, b.height);
+        }
+        content.fill_nonzero();
+        if use_alpha {
+            content.restore_state();
+        }
     }
 }
 
@@ -5249,6 +5304,192 @@ mod tests {
             text.contains("0.78431374 0.78431374 0.78431374 rg"),
             "the explicit cell background-color should be painted"
         );
+    }
+
+    /// Encode each page of `html_src` on its own and return its inflated content streams.
+    fn page_streams(html_src: &str, css: &str) -> Vec<String> {
+        let dom = html::parse(html_src.as_bytes());
+        let ua = user_agent_stylesheet();
+        let styles = compute_styles(&dom, &ua, &parse_stylesheet(css));
+        let fonts = test_fonts();
+        let settings = PageSettings::default();
+        let pages = paginate_document(&dom, &styles, &fonts, &settings);
+        pages
+            .iter()
+            .map(|page| {
+                let bytes = encode_pdf(
+                    std::slice::from_ref(page),
+                    &styles,
+                    &HashMap::new(),
+                    &fonts,
+                    &settings,
+                );
+                String::from_utf8_lossy(&decompressed_stream_bytes(&bytes)).into_owned()
+            })
+            .collect()
+    }
+
+    /// The `re` rectangles (`[x, y, w, h]`) of every fill whose colour is set by `rg_line`
+    /// (such as `"1 0 0 rg"`), one `Vec` per fill, in stream order, with the line index of the
+    /// colour operator.
+    fn fills_of(text: &str, rg_line: &str) -> Vec<(usize, Vec<[f32; 4]>)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut out = Vec::new();
+        for (i, _) in lines.iter().enumerate().filter(|(_, l)| **l == rg_line) {
+            let mut rects = Vec::new();
+            for line in &lines[i + 1..] {
+                if let Some(args) = line.strip_suffix(" re") {
+                    let v: Vec<f32> = args.split(' ').map(|n| n.parse().unwrap()).collect();
+                    rects.push([v[0], v[1], v[2], v[3]]);
+                } else if *line == "f" {
+                    break;
+                }
+            }
+            out.push((i, rects));
+        }
+        out
+    }
+
+    #[test]
+    fn row_group_backgrounds_are_painted_behind_their_rows_and_cells() {
+        // CSS2.1 17.5.1: row groups are painted before rows, and rows before cells. The tfoot
+        // colour comes from the legacy `bgcolor` attribute.
+        let html_src = r##"<table>
+            <thead><tr><th>H</th><th>H</th></tr></thead>
+            <tbody>
+                <tr><td>a</td><td>a</td></tr>
+                <tr class="row"><td>b</td><td class="cell">b</td></tr>
+            </tbody>
+            <tfoot bgcolor="#0000ff"><tr><td>f</td><td>f</td></tr></tfoot>
+        </table>"##;
+        let css = "table { border-spacing: 0 } td, th { height: 30px } \
+                   thead { background: rgb(255, 0, 0) } \
+                   tbody { background: rgb(0, 255, 0) } \
+                   tr.row { background: rgb(255, 255, 0) } \
+                   td.cell { background: rgb(0, 255, 255) }";
+        let streams = page_streams(html_src, css);
+        assert_eq!(streams.len(), 1);
+        let text = &streams[0];
+
+        let thead = fills_of(text, "1 0 0 rg");
+        let tbody = fills_of(text, "0 1 0 rg");
+        let tfoot = fills_of(text, "0 0 1 rg");
+        let row = fills_of(text, "1 1 0 rg");
+        let cell = fills_of(text, "0 1 1 rg");
+        for (name, fills, cells) in [
+            ("thead", &thead, 2),
+            ("tbody", &tbody, 4),
+            ("tfoot", &tfoot, 2),
+        ] {
+            assert_eq!(fills.len(), 1, "{name} should be painted once:\n{text}");
+            assert_eq!(fills[0].1.len(), cells, "{name} covers each of its cells");
+        }
+        // Every rectangle of a group is a 30px-high cell in that group's band (the content
+        // stream is in CSS px): the tbody's four cells stack between the thead and the tfoot.
+        let tops = |fills: &[(usize, Vec<[f32; 4]>)]| -> Vec<f32> {
+            fills[0].1.iter().map(|r| r[1] + r[3]).collect()
+        };
+        assert!(tbody[0].1.iter().all(|r| (r[3] - 30.0).abs() < 0.01));
+        let thead_bottom = thead[0].1[0][1];
+        let tfoot_top = tops(&tfoot)[0];
+        assert!(tops(&tbody).iter().all(|&t| t <= thead_bottom + 0.01));
+        assert!(tbody[0].1.iter().all(|r| r[1] >= tfoot_top - 0.01));
+
+        // All three groups are painted before the row and the cell on top of them.
+        let last_group = [&thead, &tbody, &tfoot]
+            .iter()
+            .map(|f| f[0].0)
+            .max()
+            .unwrap();
+        assert_eq!(row.len(), 1, "the row background is still painted");
+        assert_eq!(cell.len(), 1, "the cell background is still painted");
+        assert!(last_group < row[0].0 && row[0].0 < cell[0].0, "{text}");
+    }
+
+    #[test]
+    fn row_group_background_leaves_the_border_spacing_to_the_table() {
+        // With `border-collapse: separate`, the gaps between cells always show the table's
+        // background (CSS2.1 17.5.1), so the row group fills each cell rather than the band.
+        let html_src = r#"<table><tbody>
+            <tr><td>a</td><td>a</td></tr>
+            <tr><td>b</td><td>b</td></tr>
+        </tbody></table>"#;
+        let css = "table { border-spacing: 8px } td { width: 40px; height: 40px } \
+                   tbody { background: rgb(0, 255, 0) }";
+        let streams = page_streams(html_src, css);
+        let fills = fills_of(&streams[0], "0 1 0 rg");
+        assert_eq!(fills.len(), 1);
+        let rects = &fills[0].1;
+        assert_eq!(rects.len(), 4, "one rectangle per cell: {rects:?}");
+        let mut xs: Vec<f32> = rects.iter().map(|r| r[0]).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup();
+        let mut ys: Vec<f32> = rects.iter().map(|r| r[1]).collect();
+        ys.sort_by(f32::total_cmp);
+        ys.dedup();
+        // The second column and row start one cell plus the 8px gap later.
+        assert_eq!(xs.len(), 2);
+        assert_eq!(ys.len(), 2);
+        assert!(
+            (xs[1] - xs[0] - (rects[0][2] + 8.0)).abs() < 0.01,
+            "{rects:?}"
+        );
+        assert!(
+            (ys[1] - ys[0] - (rects[0][3] + 8.0)).abs() < 0.01,
+            "{rects:?}"
+        );
+    }
+
+    #[test]
+    fn row_group_background_on_a_split_table_covers_only_the_rows_on_each_page() {
+        // Each page's fragment paints the tbody behind the body rows placed on that page only,
+        // and the repeated thead rows get the thead background on every page.
+        let rows: String = (0..60).map(|i| format!("<tr><td>{i}</td></tr>")).collect();
+        let html_src =
+            format!("<table><thead><tr><th>H</th></tr></thead><tbody>{rows}</tbody></table>");
+        let css = "table { border-spacing: 0 } td, th { height: 40px } \
+                   thead { background: rgb(255, 0, 0) } \
+                   tbody { background: rgb(0, 255, 0) }";
+        let streams = page_streams(&html_src, css);
+        assert!(
+            streams.len() >= 3,
+            "the table should split over several pages"
+        );
+
+        let settings = PageSettings::default();
+        let content_bottom = settings.margin.bottom;
+        let mut body_cells = 0;
+        for (page, text) in streams.iter().enumerate() {
+            let thead = fills_of(text, "1 0 0 rg");
+            let tbody = fills_of(text, "0 1 0 rg");
+            assert_eq!(
+                thead.len(),
+                1,
+                "page {page}: the thead repeats with its background"
+            );
+            assert_eq!(tbody.len(), 1, "page {page}");
+            // One 40px rectangle per body row on this page, stacked right below the repeated
+            // thead row and none past the bottom of the page's content area.
+            let rects = &tbody[0].1;
+            let thead_bottom = thead[0].1[0][1];
+            assert!(
+                rects.iter().all(|r| (r[3] - 40.0).abs() < 0.01),
+                "page {page}"
+            );
+            for (i, r) in rects.iter().enumerate() {
+                let expected_top = thead_bottom - 40.0 * i as f32;
+                assert!(
+                    (r[1] + r[3] - expected_top).abs() < 0.01,
+                    "page {page}: {rects:?}"
+                );
+            }
+            assert!(
+                rects.iter().all(|r| r[1] >= content_bottom - 0.01),
+                "page {page}"
+            );
+            body_cells += rects.len();
+        }
+        assert_eq!(body_cells, 60, "every body row is painted exactly once");
     }
 
     /// Convert the given HTML/CSS to PDF and return the number of fill (`f`) operators in the

@@ -112,6 +112,9 @@ pub struct LaidOutTableRow {
     /// The section this row belongs to. `paginate` uses it to repeat the `<thead>` rows at
     /// the top of every page.
     pub section: TableSection,
+    /// The row group element (`<thead>`/`<tbody>`/`<tfoot>`) the row sits in. `None` for a
+    /// row placed directly in the table.
+    pub group: Option<NodeId>,
 }
 
 /// One absolutely positioned box.
