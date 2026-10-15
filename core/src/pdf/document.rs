@@ -939,10 +939,27 @@ pub(super) struct LinkArea {
     pub y1: f32,
 }
 
-/// Walk the boxes on a page and collect the `/Link` annotation rectangles from the text runs
-/// belonging to an `<a href>`. Consecutive runs of the same link within a line are merged
-/// into one rectangle, and what wrapped onto another line becomes a separate rectangle.
+/// Walk the boxes on a page and collect the `/Link` annotation rectangles of its `<a href>`s.
+///
+/// An `<a>` with a box of its own (`display: block`, `flex`, `inline-block` and so on, or a
+/// flex or grid item) gives its border box, once per page it is split across. An inline `<a>`
+/// gives the text runs and atomic boxes (`<img>`, `inline-block`) inside it: consecutive ones
+/// of the same link within a line are merged into one rectangle, and what wrapped onto another
+/// line becomes a separate rectangle.
 pub(super) fn collect_link_areas(b: &LaidOutBox, settings: &PageSettings, out: &mut Vec<LinkArea>) {
+    if let Some(href) = &b.link {
+        let border_box = b.layout.border_box();
+        if border_box.width > 0.0 && border_box.height > 0.0 {
+            let x0 = settings.margin.left + border_box.x;
+            out.push(LinkArea {
+                href: href.clone(),
+                x0,
+                y0: to_pdf_y(settings, border_box.y + border_box.height),
+                x1: x0 + border_box.width,
+                y1: to_pdf_y(settings, border_box.y),
+            });
+        }
+    }
     match &b.content {
         LaidOutContent::Blocks(children) | LaidOutContent::Flex(children) => {
             for child in children {
@@ -976,29 +993,61 @@ pub(super) fn collect_link_areas(b: &LaidOutBox, settings: &PageSettings, out: &
     }
 }
 
+/// A run or atomic box of a line, as [`push_line_link_areas`] merges them.
+struct LinePiece<'a> {
+    link: Option<&'a Rc<str>>,
+    /// The rectangle in PDF coordinates.
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
 fn push_line_link_areas(line: &LineBox, settings: &PageSettings, out: &mut Vec<LinkArea>) {
-    let mut current: Option<LinkArea> = None;
+    // The runs and the atomic boxes of the line in visual order.
+    let mut pieces: Vec<LinePiece<'_>> = Vec::with_capacity(line.runs.len() + line.atomics.len());
     for run in &line.runs {
-        let Some(href) = &run.link else {
+        let x0 = settings.margin.left + line.rect.x + run.x_offset;
+        // The annotation's height is the ascent-to-descent range, relative to the run's
+        // baseline (including any `vertical-align` shift).
+        let baseline_y = to_pdf_y(settings, line.rect.y + line.baseline) + run.baseline_shift;
+        pieces.push(LinePiece {
+            link: run.link.as_ref(),
+            x0,
+            y0: baseline_y - run.descent,
+            x1: x0 + run.width,
+            y1: baseline_y + run.ascent,
+        });
+    }
+    for atomic in &line.atomics {
+        let border_box = atomic.content.layout.border_box();
+        let x0 = settings.margin.left + border_box.x;
+        pieces.push(LinePiece {
+            link: atomic.link.as_ref(),
+            x0,
+            y0: to_pdf_y(settings, border_box.y + border_box.height),
+            x1: x0 + border_box.width,
+            y1: to_pdf_y(settings, border_box.y),
+        });
+    }
+    if !line.atomics.is_empty() {
+        pieces.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+    }
+
+    let mut current: Option<LinkArea> = None;
+    for piece in pieces {
+        let Some(href) = piece.link else {
             if let Some(area) = current.take() {
                 out.push(area);
             }
             continue;
         };
-        let x0 = settings.margin.left + line.rect.x + run.x_offset;
-        let x1 = x0 + run.width;
-        // The annotation's height is the ascent-to-descent range, relative to the run's
-        // baseline (including any `vertical-align` shift).
-        let baseline_y = to_pdf_y(settings, line.rect.y + line.baseline) + run.baseline_shift;
-        let y0 = baseline_y - run.descent;
-        let y1 = baseline_y + run.ascent;
-
         match &mut current {
             // The rectangle is extended while the same link continues.
             Some(area) if area.href == *href => {
-                area.x1 = area.x1.max(x1);
-                area.y0 = area.y0.min(y0);
-                area.y1 = area.y1.max(y1);
+                area.x1 = area.x1.max(piece.x1);
+                area.y0 = area.y0.min(piece.y0);
+                area.y1 = area.y1.max(piece.y1);
             }
             _ => {
                 if let Some(area) = current.take() {
@@ -1006,10 +1055,10 @@ fn push_line_link_areas(line: &LineBox, settings: &PageSettings, out: &mut Vec<L
                 }
                 current = Some(LinkArea {
                     href: href.clone(),
-                    x0,
-                    y0,
-                    x1,
-                    y1,
+                    x0: piece.x0,
+                    y0: piece.y0,
+                    x1: piece.x1,
+                    y1: piece.y1,
                 });
             }
         }
@@ -6197,6 +6246,99 @@ mod tests {
     fn an_anchor_without_href_is_not_a_link() {
         let areas = link_areas_of(r#"<p><a name="x">anchor</a></p>"#, "body { margin: 0; }");
         assert!(areas.is_empty(), "{areas:?}");
+    }
+
+    #[test]
+    fn an_anchor_with_a_box_of_its_own_is_linked_over_its_border_box() {
+        // `display: block`, `flex` and `inline-block` anchors, and an anchor that is a flex
+        // item, used to produce no area: only text runs inside an inline `<a>` carried a link.
+        for (html_src, href) in [
+            (
+                r#"<a style="display: block" href="https://e.com/block">block</a>"#,
+                "https://e.com/block",
+            ),
+            (
+                r#"<a style="display: flex" href="https://e.com/flex">flex <span>x</span></a>"#,
+                "https://e.com/flex",
+            ),
+            (
+                r#"<p><a style="display: inline-block" href="https://e.com/ib">ib</a></p>"#,
+                "https://e.com/ib",
+            ),
+            (
+                r#"<p><a style="display: inline-flex" href="https://e.com/if">if</a></p>"#,
+                "https://e.com/if",
+            ),
+            (
+                r#"<div style="display: flex">text <a href="https://e.com/item">item</a></div>"#,
+                "https://e.com/item",
+            ),
+        ] {
+            let areas = link_areas_of(html_src, "body { margin: 0; }");
+            assert_eq!(areas.len(), 1, "{html_src}: {areas:?}");
+            assert_eq!(&*areas[0].href, href);
+            assert!(areas[0].x1 > areas[0].x0 && areas[0].y1 > areas[0].y0);
+        }
+    }
+
+    #[test]
+    fn a_block_anchor_area_is_its_border_box() {
+        let areas = link_areas_of(
+            r#"<a href="https://e.com" style="display: block; width: 100px; height: 40px; padding: 5px; border: 2px solid; margin-left: 10px">x</a>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(areas.len(), 1);
+        let settings = PageSettings::default();
+        let area = &areas[0];
+        assert!(
+            (area.x0 - (settings.margin.left + 10.0)).abs() < 0.01,
+            "{area:?}"
+        );
+        assert!((area.x1 - area.x0 - 114.0).abs() < 0.01, "{area:?}");
+        assert!((area.y1 - area.y0 - 54.0).abs() < 0.01, "{area:?}");
+        assert!(
+            (area.y1 - to_pdf_y(&settings, 0.0)).abs() < 0.01,
+            "{area:?}"
+        );
+    }
+
+    #[test]
+    fn a_box_inside_an_inline_anchor_joins_the_area_of_its_text() {
+        // An `<img>` or `inline-block` inside an inline `<a>` is part of the link, merged
+        // with the text around it on the same line.
+        let areas = link_areas_of(
+            r#"<p>see <a href="https://e.com">the <span style="display: inline-block; width: 30px; height: 30px"></span> mark</a> here</p>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(areas.len(), 1, "{areas:?}");
+        // The 30px box is taller than the text, so the area reaches its height.
+        assert!(areas[0].y1 - areas[0].y0 >= 30.0, "{areas:?}");
+
+        let alone = link_areas_of(
+            r#"<p><a href="https://e.com"><span style="display: inline-block; width: 30px; height: 30px"></span></a></p>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(alone.len(), 1, "{alone:?}");
+        assert!((alone[0].x1 - alone[0].x0 - 30.0).abs() < 0.01, "{alone:?}");
+    }
+
+    #[test]
+    fn a_block_anchor_split_across_pages_is_linked_on_every_page() {
+        let paragraphs = "<p>line</p>".repeat(120);
+        let html_src =
+            format!(r#"<a style="display: block" href="https://e.com">{paragraphs}</a>"#);
+        let dom = html::parse(html_src.as_bytes());
+        let styles = compute_styles(&dom, &user_agent_stylesheet(), &parse_stylesheet(""));
+        let settings = PageSettings::default();
+        let pages = paginate_document(&dom, &styles, &test_fonts(), &settings);
+        assert!(pages.len() > 1, "the anchor should split across pages");
+        for (i, page) in pages.iter().enumerate() {
+            let mut areas = Vec::new();
+            for b in &page.boxes {
+                collect_link_areas(b, &settings, &mut areas);
+            }
+            assert_eq!(areas.len(), 1, "page {i}: {areas:?}");
+        }
     }
 
     #[test]

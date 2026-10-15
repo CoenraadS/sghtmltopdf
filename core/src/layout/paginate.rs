@@ -875,6 +875,8 @@ struct SplitContainer {
     has_visible_decoration: bool,
     /// The marker moves to the first fragment. `place_split` takes it and uses it.
     marker: Option<Box<LineBox>>,
+    /// An `<a href>` box is a link area on every page it reaches, so each one gets a fragment.
+    link: Option<Rc<str>>,
 }
 
 impl SplitContainer {
@@ -885,6 +887,7 @@ impl SplitContainer {
             layout: b.layout,
             has_visible_decoration: b.has_visible_decoration,
             marker: b.marker.take(),
+            link: b.link.take(),
         }
     }
 
@@ -932,7 +935,8 @@ fn place_split<T>(
     // An outside marker (`list-style-position: outside`) is painted on the first
     // fragment, so a fragment is still needed even without decoration. Skipping
     // it would drop the marker of an `li` split across pages.
-    let needs_fragments = needs_decoration || container.marker.is_some();
+    let needs_fragments =
+        needs_decoration || container.marker.is_some() || container.link.is_some();
     if needs_fragments {
         // Record the absolute index of the first page this container touches.
         state.enter_split();
@@ -1086,8 +1090,8 @@ fn place_split<T>(
             let is_last = i == valid.len() - 1;
             // An undecorated container only needs the first fragment, the one
             // carrying the marker; the rest would be empty boxes painting
-            // nothing.
-            if !needs_decoration && !is_first {
+            // nothing. A link needs them all, for its area on each page.
+            if !needs_decoration && container.link.is_none() && !is_first {
                 return None;
             }
             let end_index = state.get(seg.page_index).boxes.len();
@@ -1123,6 +1127,7 @@ fn place_split<T>(
                 is_float: false,
                 content: LaidOutContent::Blocks(Vec::new()),
                 marker,
+                link: container.link.clone(),
             };
             Some((seg.page_index, seg.start_index, decoration))
         })
@@ -1241,6 +1246,8 @@ fn place_line(line: &LineBox, page_height: f32, state: &mut PaginationState<'_>,
         // A single-line synthesised wrapper is never a list-item itself, so this is always
         // `None` (the original container's `marker` is carried by the decoration fragment above).
         marker: None,
+        // Likewise, the container's link area is its decoration fragment's.
+        link: None,
     };
     *cursor += line.rect.height;
     state.last_mut().boxes.push(fragment);
@@ -1386,6 +1393,7 @@ fn flush_grid_fragment(
         content: LaidOutContent::Grid(LaidOutGrid {
             rows: std::mem::take(rows),
         }),
+        link: container.link.clone(),
     };
     state.last_mut().boxes.push(fragment);
 }
@@ -1650,6 +1658,7 @@ fn flush_table_fragment(
             rows: std::mem::take(rows),
         }),
         marker: None,
+        link: container.link.clone(),
     };
     state.last_mut().boxes.push(fragment);
 }
@@ -1705,6 +1714,7 @@ fn place_leaf(b: &mut LaidOutBox, state: &mut PaginationState<'_>, cursor: &mut 
         is_float: false,
         content: std::mem::replace(&mut b.content, LaidOutContent::Blocks(Vec::new())),
         marker: b.marker.take(),
+        link: b.link.take(),
     };
     shift_box_y_in_place(&mut translated, shift);
 
