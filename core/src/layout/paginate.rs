@@ -1683,6 +1683,7 @@ fn shift_table_row_y(row: &LaidOutTableRow, shift: f32) -> LaidOutTableRow {
         node: row.node,
         cells: row.cells.iter().map(|c| shift_box_y(c, shift)).collect(),
         section: row.section,
+        group: row.group,
     }
 }
 

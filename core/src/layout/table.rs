@@ -318,6 +318,7 @@ pub(super) fn layout_table(
             node: row.node,
             cells: laid_cells,
             section: row.section,
+            group: row.group,
         });
     }
 
@@ -1526,6 +1527,7 @@ mod tests {
             node: Some(NodeId(0)),
             cells,
             section: super::super::box_tree::TableSection::Body,
+            group: None,
         }
     }
 

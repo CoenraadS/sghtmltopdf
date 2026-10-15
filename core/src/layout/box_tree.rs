@@ -194,6 +194,9 @@ pub struct TableRow {
     /// The section this row belongs to. The pagination layer uses it to repeat the
     /// `<thead>` rows at the top of every page.
     pub section: TableSection,
+    /// The `<thead>`/`<tbody>`/`<tfoot>` element the row sits in, whose background is painted
+    /// behind the group's rows (CSS2.1 17.5.1). `None` for a row placed directly in the table.
+    pub group: Option<NodeId>,
 }
 
 /// One `display: table-cell` element (`<td>`/`<th>`).
@@ -1057,7 +1060,15 @@ fn collect_table_rows(
     out: &mut Vec<TableRow>,
     out_caption: &mut Option<NodeId>,
 ) {
-    collect_table_rows_in_section(dom, styles, node, TableSection::Body, out, out_caption);
+    collect_table_rows_in_section(
+        dom,
+        styles,
+        node,
+        TableSection::Body,
+        None,
+        out,
+        out_caption,
+    );
     // HTML4 required `<tfoot>` to be written before `<tbody>`. Now that the section is
     // known, it is moved to the end regardless of source order. The sort is stable, so the
     // order within a section is preserved.
@@ -1113,12 +1124,14 @@ fn table_child_kind(
     }
 }
 
-/// The body of [`collect_table_rows`]. `section` is the section indicated by "the container we are currently in".
+/// The body of [`collect_table_rows`]. `section` is the section indicated by "the container
+/// we are currently in", and `group` is that container's element (`None` for the table itself).
 fn collect_table_rows_in_section(
     dom: &Dom,
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
     section: TableSection,
+    group: Option<NodeId>,
     out: &mut Vec<TableRow>,
     out_caption: &mut Option<NodeId>,
 ) {
@@ -1128,25 +1141,33 @@ fn collect_table_rows_in_section(
     for child in dom.children(node) {
         match table_child_kind(dom, styles, child) {
             TableChild::Row => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
-                out.push(build_table_row(dom, styles, child, section));
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
+                out.push(build_table_row(dom, styles, child, section, group));
             }
             TableChild::Caption => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
                 if out_caption.is_none() {
                     *out_caption = Some(child);
                 }
             }
             TableChild::Section(child_section) => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
-                collect_table_rows_in_section(dom, styles, child, child_section, out, out_caption);
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
+                collect_table_rows_in_section(
+                    dom,
+                    styles,
+                    child,
+                    child_section,
+                    Some(child),
+                    out,
+                    out_caption,
+                );
             }
             TableChild::Content => pending.push(child),
             TableChild::Ignored => {}
         }
     }
 
-    flush_anonymous_row(dom, styles, &mut pending, section, out);
+    flush_anonymous_row(dom, styles, &mut pending, section, group, out);
 }
 
 /// Gather the accumulated "children that are not rows" into one anonymous `table-row` and
@@ -1157,6 +1178,7 @@ fn flush_anonymous_row(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     pending: &mut Vec<NodeId>,
     section: TableSection,
+    group: Option<NodeId>,
     out: &mut Vec<TableRow>,
 ) {
     if pending.is_empty() {
@@ -1177,6 +1199,7 @@ fn flush_anonymous_row(
         node: None,
         cells,
         section,
+        group,
     });
 }
 
@@ -1268,12 +1291,14 @@ fn build_table_row(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     row_node: NodeId,
     section: TableSection,
+    group: Option<NodeId>,
 ) -> TableRow {
     let children: Vec<NodeId> = dom.children(row_node).collect();
     TableRow {
         node: Some(row_node),
         cells: build_row_cells(dom, styles, &children),
         section,
+        group,
     }
 }
 
@@ -1933,6 +1958,48 @@ mod tests {
         assert_eq!(first_cell_text(&table.rows[0].cells[0].content), "Name");
         assert_eq!(first_cell_text(&table.rows[1].cells[0].content), "Apple");
         assert_eq!(first_cell_text(&table.rows[2].cells[0].content), "Banana");
+    }
+
+    #[test]
+    fn table_rows_record_the_row_group_they_sit_in() {
+        // The row group's background is painted behind its rows, so each row keeps the
+        // `<thead>`/`<tbody>`/`<tfoot>` element it came from (tfoot moves to the end).
+        let dom = html::parse(
+            br#"<table>
+                <thead><tr><th>H</th></tr></thead>
+                <tfoot><tr><td>F</td></tr></tfoot>
+                <tbody><tr><td>A</td></tr><tr><td>A</td></tr></tbody>
+                <tbody><tr><td>B</td></tr></tbody>
+            </table>"#,
+        );
+        let ua = user_agent_stylesheet();
+        let styles = compute_styles(&dom, &ua, &Stylesheet::default());
+        let tree = build_box_tree(&dom, &styles);
+
+        let table_node = find(&dom, dom.document(), "table").expect("table not found");
+        let table_box = find_box(&tree, table_node).expect("table box not found");
+        let BoxContent::Table(table) = &table_box.content else {
+            panic!("expected a table box");
+        };
+        let groups: Vec<NodeId> = dom
+            .children(table_node)
+            .filter(|&c| matches!(dom.node(c).data, NodeData::Element { .. }))
+            .collect();
+        let [thead, tfoot, tbody1, tbody2] = groups[..] else {
+            panic!("expected four row groups, got {groups:?}");
+        };
+
+        let row_groups: Vec<Option<NodeId>> = table.rows.iter().map(|row| row.group).collect();
+        assert_eq!(
+            row_groups,
+            vec![
+                Some(thead),
+                Some(tbody1),
+                Some(tbody1),
+                Some(tbody2),
+                Some(tfoot)
+            ]
+        );
     }
 
     #[test]
