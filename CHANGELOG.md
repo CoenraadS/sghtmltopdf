@@ -55,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `td { vertical-align: baseline }` to keep the previous alignment.
 - Text directly inside a table cell or `inline-block` with `vertical-align: middle`, `top` or
   `bottom` is no longer shifted within its own line, and neither is the box's own
-  `::before`/`::after` content. The text took on the box's
+  `::before`/`::after` content or an inside list marker. The text took on the box's
   `vertical-align`, which applies to the box itself, so each line grew taller than in
   browsers (a table row of 14px text by about 2px). Generated content of an inline element
   still moves with that element.

@@ -1078,3 +1078,22 @@ fn an_inline_elements_generated_content_moves_with_it() {
         "::before should move with the span"
     );
 }
+
+#[test]
+fn an_inside_list_marker_is_not_shifted_by_the_list_items_vertical_align() {
+    let height = |align: &str| {
+        let css = format!(
+            "body {{ margin: 0; }} li {{ list-style-position: inside; vertical-align: {align}; }}"
+        );
+        let (_, laid) = layout(r#"<ul><li>x</li></ul>"#, &css);
+        all_lines(&laid)[0].rect.height
+    };
+    let baseline = height("baseline");
+    for align in ["middle", "top", "bottom"] {
+        assert!(
+            (height(align) - baseline).abs() < 0.01,
+            "{align}: {} vs baseline {baseline}",
+            height(align)
+        );
+    }
+}

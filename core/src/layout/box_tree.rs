@@ -257,7 +257,8 @@ pub struct InlineSpan {
     /// `position` of the block.
     pub relative_insets: Vec<RelativeInset>,
     /// Whether this is text sitting directly in the block container, outside any inline
-    /// element: a text node, or the container's own `::before`/`::after` content. Its computed style is the block's own
+    /// element: a text node, or text the container generates itself (its `::before`/`::after`,
+    /// or an inside list marker). Its computed style is the block's own
     /// or a clone of it, including the block's `vertical-align` (a table cell's `middle`, say),
     /// which applies to the box and must not shift the text within its line, so the run is
     /// laid out at `baseline` (`layout::inline`).
@@ -769,7 +770,7 @@ fn apply_list_item_marker(
 
     if style.list_style_position == ListStylePosition::Inside {
         if let BoxContent::Inline(spans) = &mut b.content {
-            spans.insert(0, InlineSpan::text(node, format!("{text} ")));
+            spans.insert(0, InlineSpan::block_text(node, format!("{text} ")));
             return;
         }
     }
