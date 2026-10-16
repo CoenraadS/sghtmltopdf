@@ -1506,7 +1506,13 @@ fn layout_pre_content(
     let mut lines = Vec::new();
     let mut cursor_y = origin_y;
 
-    for segment in chars.split(|sc| sc.ch == '\n') {
+    // A newline (or `<br>`) at the very end ends the last line and does not start another, as
+    // in browsers, so the empty segment after it is dropped.
+    let mut segments: Vec<&[StyledChar]> = chars.split(|sc| sc.ch == '\n').collect();
+    if segments.len() > 1 && segments.last().is_some_and(|segment| segment.is_empty()) {
+        segments.pop();
+    }
+    for segment in segments {
         // The line height is approximated from the style of that line's first character
         // (or the IFC's first span if there is none) (a known simplification).
         let hint = segment
@@ -3132,6 +3138,23 @@ mod tests {
         let (_, spans, styles) = spans_for("a<br clear=\"left\">", "");
         let lines = layout_inline_content(&spans, &styles, &fonts, 500.0, 0.0, 0.0, None);
         assert_eq!(line_texts(&lines), vec!["a"]);
+    }
+
+    #[test]
+    fn a_trailing_newline_under_white_space_pre_ends_the_line_without_adding_one() {
+        let fonts = dejavu_only();
+        let texts = |html: &str| {
+            let (_, spans, styles) = spans_for(html, "p { white-space: pre; }");
+            line_texts(&layout_inline_content(
+                &spans, &styles, &fonts, 5000.0, 0.0, 0.0, None,
+            ))
+        };
+
+        assert_eq!(texts("a\n"), vec!["a"]);
+        assert_eq!(texts("a<br>"), vec!["a"]);
+        assert_eq!(texts("a\n\n"), vec!["a", ""]);
+        assert_eq!(texts("a\nb"), vec!["a", "b"]);
+        assert_eq!(texts("<br>"), vec![""]);
     }
 
     // ===== `vertical-align` (inline context) =====
