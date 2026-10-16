@@ -361,17 +361,24 @@ fn layout_inline_content_in_flow(
     // and boxes such as `<img>` accumulate separately into `current_runs`/`current_atomics`,
     // so these are held as x coordinates rather than indices, to apply the same rule to both.
     let mut word_boundaries: Vec<f32> = Vec::new();
+    // Whether the last item so far is a `<br>` whose `clear` moved the cursor below a float.
+    // Nothing else records that clearance, so the block would end above the float.
+    let mut cleared_by_trailing_break = false;
 
     for item in items {
         let (word, word_space_before) = match item {
             InlineItem::Word {
                 chars,
                 space_before,
-            } => (chars, space_before),
+            } => {
+                cleared_by_trailing_break = false;
+                (chars, space_before)
+            }
             InlineItem::Atomic {
                 span_index,
                 space_before,
             } => {
+                cleared_by_trailing_break = false;
                 let Some(span) = spans.get(span_index) else {
                     continue;
                 };
@@ -517,7 +524,9 @@ fn layout_inline_content_in_flow(
                 if let (Some(ctx), Some(clear)) =
                     (float_ctx, span_styles.get(style_index).map(|s| s.clear))
                 {
-                    cursor_y = ctx.clearance(clear, cursor_y);
+                    let cleared_y = ctx.clearance(clear, cursor_y);
+                    cleared_by_trailing_break = cleared_y > cursor_y;
+                    cursor_y = cleared_y;
                 }
                 continue;
             }
@@ -677,6 +686,18 @@ fn layout_inline_content_in_flow(
             line_available_width,
             &word_boundaries,
         );
+    } else if cleared_by_trailing_break {
+        // A trailing `<br clear>` (the old `<br clear="all">` clearfix) ends the block at the
+        // float's bottom, as in browsers: a zero-height line at the cleared position.
+        lines.push(finish_line(
+            Vec::new(),
+            Vec::new(),
+            0.0,
+            origin_x,
+            cursor_y,
+            0.0,
+            fonts,
+        ));
     }
 
     // Merge runs of identical appearance only after `text-align` has been applied.
@@ -3088,6 +3109,29 @@ mod tests {
             "the line after <br clear=left> must clear the float, got y={}",
             lines[1].rect.y
         );
+    }
+
+    #[test]
+    fn a_trailing_br_clear_ends_the_block_at_the_floats_bottom() {
+        // The old `<div><img align="left">text<br clear="all"></div>` clearfix: in browsers the
+        // block ends exactly at the float's bottom, without an extra line.
+        use crate::layout::float_ctx::FloatContext;
+        use crate::style::Float;
+
+        let (_, spans, styles) = spans_for("a<br clear=\"left\">", "");
+        let fonts = dejavu_only();
+        let mut ctx = FloatContext::new();
+        ctx.register(Float::Left, 0.0, 0.0, 50.0, 100.0);
+
+        let lines = layout_inline_content(&spans, &styles, &fonts, 500.0, 0.0, 0.0, Some(&ctx));
+        assert_eq!(line_texts(&lines), vec!["a", ""]);
+        let last = lines.last().expect("lines");
+        assert_eq!(last.rect.y + last.rect.height, 100.0);
+
+        // With nothing to clear, the trailing <br> adds no line.
+        let (_, spans, styles) = spans_for("a<br clear=\"left\">", "");
+        let lines = layout_inline_content(&spans, &styles, &fonts, 500.0, 0.0, 0.0, None);
+        assert_eq!(line_texts(&lines), vec!["a"]);
     }
 
     // ===== `vertical-align` (inline context) =====
