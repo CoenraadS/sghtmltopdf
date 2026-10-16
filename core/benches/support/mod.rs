@@ -317,6 +317,13 @@ pub const SCALE_KINDS: &[ScaleKind] = &[
         generate: universal_custom_properties_html,
         sizes: &[1_000, 5_000, 20_000],
     },
+    ScaleKind {
+        // Tailwind v4 registers non-inheriting properties, but most elements do not declare
+        // them. They should reuse the parent's inheriting map without copying initial values.
+        name: "non_inheriting_registrations",
+        generate: non_inheriting_registrations_html,
+        sizes: &[1_000, 5_000, 20_000],
+    },
 ];
 
 /// `count` fixed-height paragraphs. The same shape as the documentation's
@@ -342,6 +349,29 @@ pub fn universal_custom_properties_html(count: usize) -> String {
     html.push_str(
         " } .row { height: 20px; padding: var(--tw-p3); } \
          .border { border: var(--tw-p1) solid #999; }</style></head><body>",
+    );
+    for i in 0..count {
+        let _ = write!(html, "<div class=\"row border\"><span>row {i}</span></div>");
+    }
+    html.push_str("</body></html>");
+    html
+}
+
+/// `count` rows under 40 non-inheriting registrations, with no custom property declarations
+/// on the rows themselves. Static row styles keep the output identical before and after
+/// registration support, so this isolates the cost of carrying the registration map.
+pub fn non_inheriting_registrations_html(count: usize) -> String {
+    let mut html = String::with_capacity(count * 64 + 4096);
+    html.push_str("<html><head><style>");
+    for i in 0..40 {
+        let _ = write!(
+            html,
+            "@property --tw-p{i} {{ syntax: \"*\"; inherits: false; initial-value: {i}px; }}"
+        );
+    }
+    html.push_str(
+        ".row { height: 20px; padding: 3px; } \
+         .border { border: 1px solid #999; }</style></head><body>",
     );
     for i in 0..count {
         let _ = write!(html, "<div class=\"row border\"><span>row {i}</span></div>");

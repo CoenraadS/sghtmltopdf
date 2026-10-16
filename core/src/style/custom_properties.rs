@@ -1,4 +1,5 @@
-//! CSS Custom Properties (`--foo`/`var()`), CSS Variables Level 1.
+//! CSS Custom Properties (`--foo`/`var()`), CSS Variables Level 1, and `@property`
+//! registration from CSS Properties and Values API Level 1.
 //!
 //! Custom properties take part in the cascade and are inherited like any other inherited
 //! property. They are resolved per element, and `var()` is substituted at computed-value
@@ -12,7 +13,8 @@
 //!   the element's custom property declarations (specificity and order, `!important`, the
 //!   `style` attribute) on top of the parent's computed map, resolving `var()` references
 //!   inside the values (with cycle detection). The result is a [`CustomProperties`] stored in
-//!   the computed style, shared with the parent through an `Rc` when nothing changed.
+//!   the computed style. Inheriting values share an `Rc` with the parent when nothing changed;
+//!   registered non-inheriting values are kept separately for the element that declares them.
 //! * Each [`UnparsedDeclaration`] is then substituted against that map and parsed
 //!   ([`resolve_unparsed`]). If substitution or parsing fails, the declaration is "invalid at
 //!   computed-value time": the property behaves as `unset` (inherited value for an inherited
@@ -21,7 +23,10 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use cssparser::{CowRcStr, ParseError, Parser, ParserInput, Token};
+use cssparser::{
+    CowRcStr, DeclarationParser, ParseError, Parser, ParserInput, RuleBodyItemParser,
+    RuleBodyParser, Token,
+};
 
 use super::css_wide::{CssWideDeclaration, CssWideKeyword};
 use super::properties::{parse_declaration, PropertyDeclaration};
@@ -33,24 +38,289 @@ const MAX_FALLBACK_DEPTH: u32 = 16;
 /// contain `var()`. A name that is absent is the guaranteed-invalid value.
 pub type CustomPropertyMap = HashMap<Rc<str>, Rc<str>>;
 
+/// One valid `@property` registration. Syntax checking is deliberately not implemented;
+/// `syntax` is parsed only to validate the rule and decide whether `initial-value` is required.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PropertyRegistration {
+    pub name: Rc<str>,
+    pub inherits: bool,
+    pub initial_value: Option<Rc<str>>,
+}
+
+/// The last valid registration for each name, shared by every element in the document.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct PropertyRegistrations(Option<Rc<HashMap<Rc<str>, PropertyRegistration>>>);
+
+impl PropertyRegistrations {
+    pub fn from_stylesheets(
+        ua: &super::stylesheet::Stylesheet,
+        author: &super::stylesheet::Stylesheet,
+    ) -> Self {
+        let mut registrations = HashMap::new();
+        for registration in ua
+            .property_registrations
+            .iter()
+            .chain(&author.property_registrations)
+        {
+            registrations.insert(registration.name.clone(), registration.clone());
+        }
+        if registrations.is_empty() {
+            Self::default()
+        } else {
+            Self(Some(Rc::new(registrations)))
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&PropertyRegistration> {
+        self.0.as_ref()?.get(name)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 /// The custom properties in effect on an element. Cloning is cheap (an `Rc`), and an element
 /// that does not change anything shares its parent's map.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct CustomProperties(Option<Rc<CustomPropertyMap>>);
+#[derive(Debug, Clone, Default)]
+pub struct CustomProperties {
+    /// Values that inherit by default: unregistered properties and registered properties
+    /// whose `inherits` descriptor is true.
+    inherited_values: Option<Rc<CustomPropertyMap>>,
+    /// Values of registered non-inheriting properties declared on this element. An absent
+    /// value falls back to the registration's initial value instead of the parent.
+    local_values: Option<Rc<CustomPropertyMap>>,
+    registrations: PropertyRegistrations,
+}
 
 impl CustomProperties {
+    pub(super) fn with_registrations(registrations: PropertyRegistrations) -> Self {
+        Self {
+            inherited_values: None,
+            local_values: None,
+            registrations,
+        }
+    }
+
+    pub(super) fn set_registrations(&mut self, registrations: PropertyRegistrations) {
+        self.registrations = registrations;
+    }
+
+    pub(super) fn registrations(&self) -> PropertyRegistrations {
+        self.registrations.clone()
+    }
+
+    pub(super) fn shares_registrations(&self, registrations: &PropertyRegistrations) -> bool {
+        match (&self.registrations.0, &registrations.0) {
+            (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    pub(super) fn can_share_with_child(&self) -> bool {
+        self.local_values.is_none()
+    }
+
     /// The computed value of `name` (including the leading `--`), if it is set.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0.as_ref()?.get(name).map(|value| &**value)
+        if self.registration_inherits(name) == Some(false) {
+            return self
+                .local_values
+                .as_ref()
+                .and_then(|map| map.get(name))
+                .map(|value| &**value)
+                .or_else(|| self.registered_initial(name));
+        }
+        self.inherited_values
+            .as_ref()
+            .and_then(|map| map.get(name))
+            .map(|value| &**value)
+            .or_else(|| self.registered_initial(name))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.as_ref().is_none_or(|map| map.is_empty())
+        self.inherited_values
+            .as_ref()
+            .is_none_or(|map| map.is_empty())
+            && self.local_values.as_ref().is_none_or(|map| map.is_empty())
+            && self.registrations.0.as_ref().is_none_or(|map| {
+                map.values()
+                    .all(|registration| registration.initial_value.is_none())
+            })
     }
 
     fn lookup(&self, name: &str) -> Option<Rc<str>> {
-        self.0.as_ref()?.get(name).cloned()
+        if self.registration_inherits(name) == Some(false) {
+            return self
+                .local_values
+                .as_ref()
+                .and_then(|map| map.get(name))
+                .cloned()
+                .or_else(|| self.registration_initial(name));
+        }
+        self.inherited_values
+            .as_ref()
+            .and_then(|map| map.get(name))
+            .cloned()
+            .or_else(|| self.registration_initial(name))
     }
+
+    fn registered_initial(&self, name: &str) -> Option<&str> {
+        self.registrations.get(name)?.initial_value.as_deref()
+    }
+
+    fn registration_initial(&self, name: &str) -> Option<Rc<str>> {
+        self.registrations.get(name)?.initial_value.clone()
+    }
+
+    fn registration_inherits(&self, name: &str) -> Option<bool> {
+        Some(self.registrations.get(name)?.inherits)
+    }
+
+    fn inherited_lookup(&self, name: &str) -> Option<Rc<str>> {
+        match self.registrations.get(name) {
+            Some(registration) if !registration.inherits => registration.initial_value.clone(),
+            _ => self.lookup(name),
+        }
+    }
+
+    fn initial_value(&self, name: &str) -> Option<Rc<str>> {
+        self.registration_initial(name)
+    }
+
+    fn invalid_value(&self, name: &str) -> Option<Rc<str>> {
+        match self.registrations.get(name) {
+            Some(registration) if registration.inherits => self.lookup(name),
+            Some(registration) => registration.initial_value.clone(),
+            None => None,
+        }
+    }
+}
+
+impl PartialEq for CustomProperties {
+    fn eq(&self, other: &Self) -> bool {
+        same_shared_map(&self.inherited_values, &other.inherited_values)
+            && same_shared_map(&self.local_values, &other.local_values)
+            && match (&self.registrations.0, &other.registrations.0) {
+                (Some(left), Some(right)) => Rc::ptr_eq(left, right) || left == right,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+fn same_shared_map(
+    left: &Option<Rc<CustomPropertyMap>>,
+    right: &Option<Rc<CustomPropertyMap>>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Rc::ptr_eq(left, right) || left == right,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+enum PropertyDescriptor {
+    Syntax(Rc<str>),
+    Inherits(bool),
+    InitialValue(Rc<str>),
+}
+
+struct PropertyDescriptorParser;
+
+impl<'i> DeclarationParser<'i> for PropertyDescriptorParser {
+    type Declaration = PropertyDescriptor;
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _declaration_start: &cssparser::ParserState,
+    ) -> Result<Self::Declaration, ParseError<'i, Self::Error>> {
+        if name.eq_ignore_ascii_case("syntax") {
+            let syntax = input.expect_string_cloned()?;
+            input.expect_exhausted()?;
+            return Ok(PropertyDescriptor::Syntax(Rc::from(&*syntax)));
+        }
+        if name.eq_ignore_ascii_case("inherits") {
+            let inherits = input.expect_ident_cloned()?;
+            input.expect_exhausted()?;
+            if inherits.eq_ignore_ascii_case("true") {
+                return Ok(PropertyDescriptor::Inherits(true));
+            }
+            if inherits.eq_ignore_ascii_case("false") {
+                return Ok(PropertyDescriptor::Inherits(false));
+            }
+            return Err(input.new_custom_error(()));
+        }
+        if name.eq_ignore_ascii_case("initial-value") {
+            let start = input.state();
+            while input.next_including_whitespace_and_comments().is_ok() {}
+            let value = input.slice_from(start.position()).trim();
+            if value.is_empty() {
+                return Err(input.new_custom_error(()));
+            }
+            return Ok(PropertyDescriptor::InitialValue(Rc::from(value)));
+        }
+        Err(input.new_custom_error(()))
+    }
+}
+
+impl<'i> cssparser::QualifiedRuleParser<'i> for PropertyDescriptorParser {
+    type Prelude = ();
+    type QualifiedRule = PropertyDescriptor;
+    type Error = ();
+}
+
+impl<'i> cssparser::AtRuleParser<'i> for PropertyDescriptorParser {
+    type Prelude = ();
+    type AtRule = PropertyDescriptor;
+    type Error = ();
+}
+
+impl<'i> RuleBodyItemParser<'i, PropertyDescriptor, ()> for PropertyDescriptorParser {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// Parse the descriptors of one `@property` rule. Invalid and unknown descriptors are
+/// ignored; the whole registration is invalid when a required descriptor is absent.
+pub(super) fn parse_property_rule_block<'i, 't>(
+    name: Rc<str>,
+    input: &mut Parser<'i, 't>,
+) -> Result<PropertyRegistration, ParseError<'i, ()>> {
+    let mut syntax = None;
+    let mut inherits = None;
+    let mut initial_value = None;
+    let mut parser = PropertyDescriptorParser;
+    for descriptor in RuleBodyParser::new(input, &mut parser).flatten() {
+        match descriptor {
+            PropertyDescriptor::Syntax(value) => syntax = Some(value),
+            PropertyDescriptor::Inherits(value) => inherits = Some(value),
+            PropertyDescriptor::InitialValue(value) => initial_value = Some(value),
+        }
+    }
+    let Some(syntax) = syntax else {
+        return Err(input.new_custom_error(()));
+    };
+    let Some(inherits) = inherits else {
+        return Err(input.new_custom_error(()));
+    };
+    if initial_value.is_none() && &*syntax != "*" {
+        return Err(input.new_custom_error(()));
+    }
+    Ok(PropertyRegistration {
+        name,
+        inherits,
+        initial_value,
+    })
 }
 
 /// A `--name: value` declaration, with the value kept as written (trimmed).
@@ -265,7 +535,7 @@ fn substitute_in_scope(
 /// Resolves the winning custom property declarations of one element against each other and
 /// the inherited values.
 struct Resolver<'a> {
-    inherited: &'a CustomProperties,
+    parent: &'a CustomProperties,
     winners: HashMap<Rc<str>, Rc<str>>,
     done: HashMap<Rc<str>, Option<Rc<str>>>,
     stack: Vec<Rc<str>>,
@@ -282,7 +552,7 @@ impl Resolver<'_> {
             .get_key_value(name)
             .map(|(k, v)| (k.clone(), v.clone()))
         else {
-            return self.inherited.lookup(name);
+            return self.parent.inherited_lookup(name);
         };
         if let Some(position) = self.stack.iter().position(|n| **n == *name) {
             // A reference cycle: every property on the cycle is invalid.
@@ -291,18 +561,21 @@ impl Resolver<'_> {
             return None;
         }
 
-        let value = if raw.eq_ignore_ascii_case("initial") {
-            None
-        } else if raw.eq_ignore_ascii_case("inherit") || raw.eq_ignore_ascii_case("unset") {
-            self.inherited.lookup(name)
+        let (value, invalid) = if raw.eq_ignore_ascii_case("initial") {
+            (self.parent.initial_value(name), false)
+        } else if raw.eq_ignore_ascii_case("inherit") {
+            (self.parent.lookup(name), false)
+        } else if raw.eq_ignore_ascii_case("unset") {
+            (self.parent.inherited_lookup(name), false)
         } else {
             self.stack.push(key.clone());
             let substituted = substitute_vars(&raw, &mut |n| self.resolve(n), 0);
             self.stack.pop();
-            substituted.map(|s| Rc::from(s.as_str()))
+            let invalid = substituted.is_none();
+            (substituted.map(|s| Rc::from(s.as_str())), invalid)
         };
-        let value = if self.cyclic.contains(name) {
-            None
+        let value = if self.cyclic.contains(name) || invalid {
+            self.parent.invalid_value(name)
         } else {
             value
         };
@@ -312,30 +585,30 @@ impl Resolver<'_> {
 }
 
 /// Cascade the custom property declarations in `declarations` (given in ascending cascade
-/// priority) on top of `inherited`, the parent's computed custom properties.
+/// priority) on top of `parent`, the parent's computed custom properties.
 ///
 /// Normal declarations are applied in order, then `!important` ones, so an important
 /// declaration beats everything, an inline `style` included. When nothing changes the
 /// parent's map is shared as is.
 pub fn compute_custom_properties<'a, I>(
-    inherited: &CustomProperties,
+    parent: &CustomProperties,
     declarations: I,
 ) -> CustomProperties
 where
     I: Iterator<Item = &'a PropertyDeclaration> + Clone,
 {
-    // Fast path: every winning value is one of the declared values, so when none of them can
-    // change the inherited map (a plain value equal to the one already inherited) the element
-    // shares its parent's map. Tailwind v3's preflight declares dozens of properties on `*`,
-    // which lands here on every element.
+    // Fast path: every winning value is one of the declared values, so when none can change
+    // the value this element starts with, reuse the parent's inheriting map. Tailwind v3's
+    // preflight declares dozens of properties on `*`, which lands here on every element.
     let unchanged = declarations.clone().all(|declaration| {
         let PropertyDeclaration::Custom(custom) = declaration else {
             return true;
         };
-        is_plain_value(&custom.value) && inherited.get(&custom.name) == Some(&*custom.value)
+        is_plain_value(&custom.value)
+            && parent.inherited_lookup(&custom.name).as_deref() == Some(&*custom.value)
     });
     if unchanged {
-        return inherited.clone();
+        return inherited_child(parent);
     }
 
     let mut winners: HashMap<Rc<str>, Rc<str>> = HashMap::new();
@@ -349,12 +622,12 @@ where
         }
     }
     if winners.is_empty() {
-        return inherited.clone();
+        return inherited_child(parent);
     }
 
     let names: Vec<Rc<str>> = winners.keys().cloned().collect();
     let mut resolver = Resolver {
-        inherited,
+        parent,
         winners,
         done: HashMap::new(),
         stack: Vec::new(),
@@ -368,25 +641,49 @@ where
         })
         .collect();
 
-    let mut map: Option<CustomPropertyMap> = None;
+    let mut inherited_map: Option<CustomPropertyMap> = None;
+    let mut local_map = CustomPropertyMap::new();
     for (name, value) in resolved {
-        let current = inherited.lookup(&name);
-        if current == value {
+        if parent.registration_inherits(&name) == Some(false) {
+            if parent.registration_initial(&name) != value {
+                if let Some(value) = value {
+                    local_map.insert(name, value);
+                }
+            }
             continue;
         }
-        let map = map.get_or_insert_with(|| inherited.0.as_deref().cloned().unwrap_or_default());
-        match value {
-            Some(value) => {
-                map.insert(name, value);
-            }
-            None => {
-                map.remove(&name);
+        if parent.lookup(&name) != value {
+            let map = inherited_map.get_or_insert_with(|| {
+                parent
+                    .inherited_values
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            match value {
+                Some(value) => {
+                    map.insert(name, value);
+                }
+                None => {
+                    map.remove(&name);
+                }
             }
         }
     }
-    match map {
-        Some(map) => CustomProperties(Some(Rc::new(map))),
-        None => inherited.clone(),
+    CustomProperties {
+        inherited_values: inherited_map
+            .map(Rc::new)
+            .or_else(|| parent.inherited_values.clone()),
+        local_values: (!local_map.is_empty()).then(|| Rc::new(local_map)),
+        registrations: parent.registrations.clone(),
+    }
+}
+
+fn inherited_child(parent: &CustomProperties) -> CustomProperties {
+    CustomProperties {
+        inherited_values: parent.inherited_values.clone(),
+        local_values: None,
+        registrations: parent.registrations.clone(),
     }
 }
 
@@ -534,7 +831,32 @@ pub fn uses_variables<'a>(mut declarations: impl Iterator<Item = &'a PropertyDec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::parse_stylesheet;
+    use crate::style::{parse_stylesheet, Stylesheet};
+
+    #[test]
+    fn property_rule_descriptors_are_parsed() {
+        let sheet = parse_stylesheet(
+            r#"@property --gap { syntax: "<length>"; inherits: false; initial-value: 3px }
+               @property --tokens { syntax: "*"; inherits: true }"#,
+        );
+        assert_eq!(sheet.property_registrations.len(), 2);
+        let gap = &sheet.property_registrations[0];
+        assert_eq!(&*gap.name, "--gap");
+        assert!(!gap.inherits);
+        assert_eq!(gap.initial_value.as_deref(), Some("3px"));
+        assert_eq!(sheet.property_registrations[1].initial_value, None);
+    }
+
+    #[test]
+    fn invalid_property_rules_are_dropped() {
+        let sheet = parse_stylesheet(
+            r#"@property --a { inherits: false; initial-value: 1px }
+               @property --b { syntax: "*"; initial-value: 2px }
+               @property --c { syntax: "<length>"; inherits: false }
+               @property --d { syntax: "<length>"; inherits: false; initial-value: }"#,
+        );
+        assert!(sheet.property_registrations.is_empty());
+    }
 
     #[test]
     fn every_kind_of_property_has_a_longhand_probe() {
@@ -631,8 +953,8 @@ mod tests {
         let parent = compute(&CustomProperties::default(), &decls("p { --a: 1px }"));
         let child = compute(&parent, &decls("p { --a: 1px }"));
         assert!(Rc::ptr_eq(
-            parent.0.as_ref().unwrap(),
-            child.0.as_ref().unwrap()
+            parent.inherited_values.as_ref().unwrap(),
+            child.inherited_values.as_ref().unwrap()
         ));
     }
 
@@ -642,9 +964,29 @@ mod tests {
         let parent = compute(&CustomProperties::default(), &decls(css));
         let child = compute(&parent, &decls(css));
         assert!(Rc::ptr_eq(
-            parent.0.as_ref().unwrap(),
-            child.0.as_ref().unwrap()
+            parent.inherited_values.as_ref().unwrap(),
+            child.inherited_values.as_ref().unwrap()
         ));
+    }
+
+    #[test]
+    fn non_inheriting_registrations_keep_the_inheriting_map_shared() {
+        let author = parse_stylesheet(
+            r#"@property --local { syntax: "*"; inherits: false; initial-value: solid }"#,
+        );
+        let initial = CustomProperties::with_registrations(
+            PropertyRegistrations::from_stylesheets(&Stylesheet::default(), &author),
+        );
+        let parent = compute(&initial, &decls("p { --shared: 1px; --local: none }"));
+        let child = compute(&parent, &[]);
+
+        assert!(Rc::ptr_eq(
+            parent.inherited_values.as_ref().unwrap(),
+            child.inherited_values.as_ref().unwrap()
+        ));
+        assert_eq!(parent.get("--local"), Some("none"));
+        assert_eq!(child.get("--local"), Some("solid"));
+        assert!(child.local_values.is_none());
     }
 
     #[test]

@@ -100,6 +100,40 @@ fn without_wall_clock_metadata(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One path painting or clipping operator in a content stream, with the subpaths built for it
+/// (each the operator lines from its `m` or `re` on, joined with newlines).
+#[derive(Debug)]
+struct PathOp {
+    operator: String,
+    subpaths: Vec<String>,
+}
+
+/// The fills (`f`, `f*`) and even-odd clips (`W*`) in a content stream, in order.
+fn path_ops(stream: &[u8]) -> Vec<PathOp> {
+    let mut ops = Vec::new();
+    let mut subpaths: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(stream).lines() {
+        let operator = line.rsplit(' ').next().unwrap_or("");
+        match operator {
+            "m" | "re" => subpaths.push(line.to_string()),
+            "l" | "c" | "h" => {
+                if let Some(subpath) = subpaths.last_mut() {
+                    subpath.push('\n');
+                    subpath.push_str(line);
+                }
+            }
+            // With no path built, the line is not an operator (it is in a font's bytes, say).
+            "f" | "f*" | "W*" if !subpaths.is_empty() => ops.push(PathOp {
+                operator: operator.to_string(),
+                subpaths: std::mem::take(&mut subpaths),
+            }),
+            "n" | "S" | "s" | "B" | "b" | "W" => subpaths.clear(),
+            _ => {}
+        }
+    }
+    ops
+}
+
 fn build_pdf(html_src: &str, css: &str) -> Vec<u8> {
     let dom = html::parse(html_src.as_bytes());
     let ua = user_agent_stylesheet();
@@ -187,15 +221,102 @@ fn box_shadow_with_zero_blur_draws_exactly_one_rect_end_to_end() {
 }
 
 #[test]
-fn box_shadow_with_blur_draws_multiple_concentric_rects_end_to_end() {
+fn box_shadow_with_blur_paints_each_point_once_end_to_end() {
     let bytes = build_pdf(
         r#"<div class="box">x</div>"#,
         "body { margin: 0; } \
          .box { width: 100px; height: 60px; box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); }",
     );
-    let decompressed = decompressed_stream_bytes(&bytes);
-    // The blur approximation is 4 rings plus the core rectangle = 5.
-    assert_eq!(count_occurrences(&decompressed, b"h\nf\n"), 5);
+    let fills: Vec<PathOp> = path_ops(&decompressed_stream_bytes(&bytes))
+        .into_iter()
+        .filter(|op| op.operator != "W*")
+        .collect();
+    // The core is filled whole and the 8 bands of the blur ramp around it even-odd, each
+    // between its own outline and the next one in. Overlapping fills used to stack the alpha,
+    // so the shadow came out much darker than its colour.
+    assert_eq!(fills.len(), 9, "{fills:?}");
+    assert_eq!(fills[0].operator, "f");
+    assert_eq!(fills[0].subpaths.len(), 1);
+    for pair in fills.windows(2) {
+        assert_eq!(pair[1].operator, "f*");
+        assert_eq!(pair[1].subpaths.len(), 2);
+        assert_eq!(pair[1].subpaths[1], pair[0].subpaths[0]);
+    }
+}
+
+#[test]
+fn an_outer_box_shadow_is_clipped_out_of_the_border_box_end_to_end() {
+    for radius in ["0", "12px"] {
+        let bytes = build_pdf(
+            r#"<div class="box">x</div>"#,
+            &format!(
+                "body {{ margin: 0; }} \
+                 .box {{ width: 100px; height: 60px; border-radius: {radius}; \
+                        box-shadow: 0 0 0 0 black; }}"
+            ),
+        );
+        let ops = path_ops(&decompressed_stream_bytes(&bytes));
+        // A rectangle around the shadow with the border box cut out of it, then the shadow,
+        // which here is exactly the border box, so nothing of it is visible.
+        assert_eq!(ops.len(), 2, "radius={radius}: {ops:?}");
+        assert_eq!(ops[0].operator, "W*");
+        assert_eq!(ops[0].subpaths.len(), 2);
+        assert!(ops[0].subpaths[0].ends_with(" re"));
+        assert_eq!(ops[1].operator, "f");
+        assert_eq!(ops[1].subpaths, vec![ops[0].subpaths[1].clone()]);
+        assert_eq!(
+            ops[1].subpaths[0].contains(" c\n"),
+            radius != "0",
+            "radius={radius}: the hole follows the border-radius"
+        );
+    }
+}
+
+#[test]
+fn transparent_box_shadow_layers_draw_nothing_end_to_end() {
+    let without_declaration = build_pdf(
+        r#"<div class="box">x</div>"#,
+        "body { margin: 0; } .box { width: 100px; height: 60px; }",
+    );
+    // `#00000005` has an alpha of 0.02, which rounds to the fully transparent step.
+    for shadow in [
+        "0 0 #0000",
+        "0 0 #0000, 0 0 transparent",
+        "0 1px 2px 0 #00000005",
+    ] {
+        let bytes = build_pdf(
+            r#"<div class="box">x</div>"#,
+            &format!(
+                "body {{ margin: 0; }} \
+                 .box {{ width: 100px; height: 60px; box-shadow: {shadow}; }}"
+            ),
+        );
+        assert_eq!(
+            without_wall_clock_metadata(&bytes),
+            without_wall_clock_metadata(&without_declaration),
+            "box-shadow: {shadow}"
+        );
+    }
+}
+
+#[test]
+fn tailwind_shadow_draws_only_its_visible_layer_end_to_end() {
+    let tailwind = build_pdf(
+        r#"<div class="box">x</div>"#,
+        "body { margin: 0; } \
+         .box { width: 100px; height: 60px; \
+                box-shadow: 0 0 #0000, 0 0 #0000, 0 0 #0000, 0 0 #0000, \
+                            0 1px 3px 0 #00000014, 0 1px 2px 0 #00000005; }",
+    );
+    let visible_layer = build_pdf(
+        r#"<div class="box">x</div>"#,
+        "body { margin: 0; } \
+         .box { width: 100px; height: 60px; box-shadow: 0 1px 3px 0 #00000014; }",
+    );
+    assert_eq!(
+        without_wall_clock_metadata(&tailwind),
+        without_wall_clock_metadata(&visible_layer)
+    );
 }
 
 #[test]

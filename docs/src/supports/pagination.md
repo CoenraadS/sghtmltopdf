@@ -15,6 +15,11 @@ sghtmltopdfはCSS Fragmentationのプロパティでページ分割を制御し�
 | `break-before` / `break-after` | `auto` / `avoid`(`avoid-page`・`avoid-column`も同義) / `always`(`page`も同義) |
 | `break-inside` | `auto` / `avoid`(同上) |
 
+`break-before: avoid` / `break-after: avoid`は、ブロックの兄弟要素の間の改ページを避けます。
+要素がページに収まっても、次の兄弟要素の先頭(最初の行・表の行・グリッドの行、分割されない要素なら全体)が収まらないときは、要素ごと次のページへ送ります。
+両方を合わせても1ページに収まらない場合と、要素がすでにページの先頭にある場合は送りません。
+[ストリーミングモード](../usage/cli/streaming.md)では、`<body>`直下の要素どうしの間には効きません(1要素ずつページ分割するため)。
+
 古い`page-break-before` / `page-break-after` / `page-break-inside`もエイリアスとして受け付けます。
 wkhtmltopdfやwicked_pdf向けに書いた資産をそのまま持ち込めます。
 

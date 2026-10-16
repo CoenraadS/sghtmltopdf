@@ -25,13 +25,13 @@
     },
     {
       "name": "engine/batch/block_layout",
-      "seconds": 0.013296917,
-      "peak_rss_bytes": 31883264,
-      "alloc_count": 165646,
-      "alloc_bytes": 51464428,
-      "peak_live_bytes": 25040730,
+      "seconds": 0.012878208,
+      "peak_rss_bytes": 32800768,
+      "alloc_count": 165674,
+      "alloc_bytes": 51557456,
+      "peak_live_bytes": 25064378,
       "pages": 12,
-      "pdf_bytes": 112704
+      "pdf_bytes": 121309
     },
     {
       "name": "engine/batch/flexbox",
@@ -161,7 +161,7 @@
       "alloc_bytes": 73593372,
       "peak_live_bytes": 26166924,
       "pages": 20,
-      "pdf_bytes": 161326
+      "pdf_bytes": 161639
     },
     {
       "name": "engine/streaming/text_inline",
@@ -185,13 +185,13 @@
     },
     {
       "name": "engine/streaming/block_layout",
-      "seconds": 0.011912875,
-      "peak_rss_bytes": 30457856,
-      "alloc_count": 115193,
-      "alloc_bytes": 49753761,
-      "peak_live_bytes": 24425151,
+      "seconds": 0.011566083,
+      "peak_rss_bytes": 31326208,
+      "alloc_count": 115221,
+      "alloc_bytes": 49842942,
+      "peak_live_bytes": 24446123,
       "pages": 12,
-      "pdf_bytes": 110216
+      "pdf_bytes": 118522
     },
     {
       "name": "engine/streaming/flexbox",
@@ -471,7 +471,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 20,
-      "pdf_bytes": 161326
+      "pdf_bytes": 161639
     },
     {
       "name": "cli/report_streaming",
@@ -491,7 +491,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 23,
-      "pdf_bytes": 179008
+      "pdf_bytes": 179321
     },
     {
       "name": "cli/report_header_footer_html",
@@ -501,7 +501,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 20,
-      "pdf_bytes": 166513
+      "pdf_bytes": 166826
     },
     {
       "name": "cli/report_cover",
@@ -511,7 +511,7 @@
       "alloc_bytes": 0,
       "peak_live_bytes": 0,
       "pages": 21,
-      "pdf_bytes": 163099
+      "pdf_bytes": 163412
     },
     {
       "name": "cli/invoice",
@@ -580,6 +580,66 @@
       "alloc_count": 2783903,
       "alloc_bytes": 645262462,
       "peak_live_bytes": 37514293,
+      "pages": 607,
+      "pdf_bytes": 1554901
+    },
+    {
+      "name": "scale/non_inheriting_registrations/batch/1000",
+      "seconds": 0.014568416,
+      "peak_rss_bytes": 32309248,
+      "alloc_count": 115245,
+      "alloc_bytes": 57837404,
+      "peak_live_bytes": 25597668,
+      "pages": 31,
+      "pdf_bytes": 110761
+    },
+    {
+      "name": "scale/non_inheriting_registrations/batch/5000",
+      "seconds": 0.051416917,
+      "peak_rss_bytes": 41730048,
+      "alloc_count": 566792,
+      "alloc_bytes": 158115472,
+      "peak_live_bytes": 33254636,
+      "pages": 152,
+      "pdf_bytes": 413855
+    },
+    {
+      "name": "scale/non_inheriting_registrations/batch/20000",
+      "seconds": 0.20113125,
+      "peak_rss_bytes": 77856768,
+      "alloc_count": 2280020,
+      "alloc_bytes": 539844797,
+      "peak_live_bytes": 64371316,
+      "pages": 607,
+      "pdf_bytes": 1554901
+    },
+    {
+      "name": "scale/non_inheriting_registrations/streaming/1000",
+      "seconds": 0.013588667,
+      "peak_rss_bytes": 31064064,
+      "alloc_count": 121277,
+      "alloc_bytes": 59107663,
+      "peak_live_bytes": 24676720,
+      "pages": 31,
+      "pdf_bytes": 110756
+    },
+    {
+      "name": "scale/non_inheriting_registrations/streaming/5000",
+      "seconds": 0.052329167,
+      "peak_rss_bytes": 34406400,
+      "alloc_count": 597562,
+      "alloc_bytes": 161572253,
+      "peak_live_bytes": 27280840,
+      "pages": 152,
+      "pdf_bytes": 413860
+    },
+    {
+      "name": "scale/non_inheriting_registrations/streaming/20000",
+      "seconds": 0.19386775,
+      "peak_rss_bytes": 43843584,
+      "alloc_count": 2403693,
+      "alloc_bytes": 556278413,
+      "peak_live_bytes": 37518257,
       "pages": 607,
       "pdf_bytes": 1554901
     }
