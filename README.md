@@ -328,6 +328,20 @@ msgmerge --update po/en.po po/messages.pot
 Entries whose source changed are marked `fuzzy` review and update those, then remove the marker.
 Pushing to `main` builds both languages and deploys to GitHub Pages.
 
+### Changelog
+
+Don't edit `CHANGELOG.md` directly.
+Add one Markdown file per change under the directory for its type (`added`, `changed`, `deprecated`, `removed`, `fixed` or `security`) in `changelog.d/`, named after the issue or PR, e.g. `changelog.d/fixed/91-text-after-inline-block.md`.
+Write it as the entry should read, without the leading `- `.
+
+```sh
+cargo xtask changelog check     # validate the entries (CI runs this too)
+cargo xtask changelog preview   # show the section they would make
+```
+
+When releasing, `cargo xtask changelog release <version>` moves them into `CHANGELOG.md`.
+See [changelog.d/README.md](changelog.d/README.md) for details.
+
 ## License
 
 MIT License ([LICENSE](LICENSE)).

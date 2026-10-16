@@ -1,0 +1,4 @@
+[alias]
+# The repository's own tooling (xtask/), e.g. `cargo xtask changelog release 0.6.0`.
+# The path is relative to the current directory, so run it from the repository root.
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --"

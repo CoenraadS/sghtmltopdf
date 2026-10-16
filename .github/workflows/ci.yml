@@ -30,6 +30,13 @@ jobs:
         run: cargo clippy -p sghtmltopdf --features svg-text --all-targets -- -D warnings
       - name: cargo test (svg-text)
         run: cargo test -p sghtmltopdf --features svg-text
+      # xtask/ (`cargo xtask ...`) is a workspace of its own, so the `--workspace` steps above
+      # do not reach it. Its tests also validate the entries under changelog.d/.
+      - name: xtask (fmt, clippy, test)
+        run: |
+          cargo fmt --manifest-path xtask/Cargo.toml --check
+          cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path xtask/Cargo.toml
 
   # The oldest toolchain the published crate claims to build with (`rust-version` in
   # core/Cargo.toml; keep the two in step). Only the lib and the bin count: the tests and
