@@ -150,6 +150,8 @@ pub struct AtomicInline {
     /// This box's `vertical-align` (kept so `top`/`bottom` can be resolved after the line
     /// height is settled).
     pub(super) vertical_align: VerticalAlign,
+    /// The href of the inline `<a href>` enclosing the box (`<a href><img></a>`, say).
+    pub link: Option<Rc<str>>,
 }
 
 /// One character plus a reference to the [`InlineSpan`] (that is, the computed style) it belongs to.
@@ -377,7 +379,10 @@ fn layout_inline_content_in_flow(
                 space_before,
             } => {
                 trailing_break_height = None;
-                let Some(atomic) = spans.get(span_index).and_then(|s| s.atomic.as_deref()) else {
+                let Some(span) = spans.get(span_index) else {
+                    continue;
+                };
+                let Some(atomic) = span.atomic.as_deref() else {
                     continue;
                 };
                 let style = span_styles.get(span_index).cloned().unwrap_or_default();
@@ -462,6 +467,7 @@ fn layout_inline_content_in_flow(
                     baseline_from_bottom,
                     baseline_shift: 0.0,
                     vertical_align: style.vertical_align,
+                    link: span.link.clone(),
                 });
                 current_width += margin_box_width;
                 continue;

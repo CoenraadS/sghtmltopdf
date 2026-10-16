@@ -177,3 +177,37 @@ fn a_link_spanning_two_lines_produces_two_annotations() {
         "each line of a wrapped link needs its own annotation rectangle"
     );
 }
+
+/// A 1x1 PNG, for an `<img>` that needs no fetching.
+const PNG_1X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+#[test]
+fn every_kind_of_anchor_box_becomes_one_annotation() {
+    // Issue #113: only text inside an inline `<a>` used to be linked.
+    let cases = [
+        r#"<a style="display:block" href="https://e.com/x">block anchor</a>"#,
+        r#"<a style="display:flex;gap:4px" href="https://e.com/x">flex anchor <span>x</span></a>"#,
+        r#"<a style="display:inline-block" href="https://e.com/x">inline-block anchor</a>"#,
+        r#"<a style="display:inline-flex" href="https://e.com/x">inline-flex anchor</a>"#,
+        r#"<div style="display:flex;align-items:center">text <a href="https://e.com/x">in flex parent</a></div>"#,
+        r#"<div style="display:grid">text <a href="https://e.com/x">in grid parent</a></div>"#,
+        r#"<p><a href="https://e.com/x"><img src="IMG" width="20" height="20"></a></p>"#,
+        r#"<a href="https://e.com/x"><img src="IMG" width="20" height="20"></a>"#,
+    ];
+    for case in cases {
+        let html = format!("<html><body>{}</body></html>", case.replace("IMG", PNG_1X1));
+        for mode in [Mode::Batch, Mode::Streaming] {
+            let bytes = build_pdf(&html, mode);
+            assert_eq!(
+                count_occurrences(&bytes, b"/Subtype /Link"),
+                1,
+                "{mode:?}: {case}"
+            );
+            assert_eq!(
+                count_occurrences(&bytes, b"(https://e.com/x)"),
+                1,
+                "{mode:?}: {case}"
+            );
+        }
+    }
+}

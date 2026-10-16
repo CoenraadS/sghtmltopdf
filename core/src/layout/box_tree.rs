@@ -29,6 +29,10 @@ pub struct LayoutBox {
     /// (to avoid drawing it twice). Otherwise (`outside`, or an `inside` with block
     /// children) the layout layer (`block.rs`) reads this field and places it separately.
     pub marker: Option<String>,
+    /// The href when this box is an `<a href>` element's own box (`display: block`, `flex`,
+    /// `inline-block` and so on, or a flex or grid item). The whole box becomes the link
+    /// area. An inline `<a>` makes no box: its href is carried on its spans instead.
+    pub link: Option<Rc<str>>,
     /// Memoised measurements. See [`MeasureMemo`].
     pub measured: MeasureMemo,
 }
@@ -40,6 +44,7 @@ impl LayoutBox {
             node: None,
             content,
             marker: None,
+            link: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -50,6 +55,7 @@ impl LayoutBox {
             node: Some(node),
             content,
             marker: None,
+            link: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -194,6 +200,9 @@ pub struct TableRow {
     /// The section this row belongs to. The pagination layer uses it to repeat the
     /// `<thead>` rows at the top of every page.
     pub section: TableSection,
+    /// The `<thead>`/`<tbody>`/`<tfoot>` element the row sits in, whose background is painted
+    /// behind the group's rows (CSS2.1 17.5.1). `None` for a row placed directly in the table.
+    pub group: Option<NodeId>,
 }
 
 /// One `display: table-cell` element (`<td>`/`<th>`).
@@ -301,15 +310,16 @@ impl InlineSpan {
         }
     }
 
-    /// An atomic box for `display: inline-block`.
-    fn atomic(node: NodeId, atomic: LayoutBox) -> Self {
+    /// An atomic box for `display: inline-block`, carrying the link of an enclosing inline
+    /// `<a href>` (an `<img>` inside a link, say).
+    fn atomic(node: NodeId, atomic: LayoutBox, context: &InlineContext) -> Self {
         Self {
             node,
             text: String::new(),
             is_first_letter: false,
             is_forced_break: false,
             atomic: Some(Box::new(atomic)),
-            link: None,
+            link: context.link.clone(),
             background_color: RgbaColor::TRANSPARENT,
             relative_insets: Vec::new(),
             outside_inline_element: false,
@@ -390,6 +400,24 @@ pub(crate) fn build_box_for_element(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
 ) -> Option<LayoutBox> {
+    let mut b = build_element_box(dom, styles, node)?;
+    // An inline `<a>` reaches here only as a top-level element in streaming mode. Its href is
+    // already on the spans (`build_element_box`), so the area hugs the text rather than the
+    // whole width of the box.
+    let link_on_spans = styles.get(&node).map(|s| s.display) == Some(Display::Inline)
+        && matches!(b.content, BoxContent::Inline(_));
+    if !link_on_spans {
+        b.link = link_href(dom, node);
+    }
+    Some(b)
+}
+
+/// The body of [`build_box_for_element`], everything but the link.
+fn build_element_box(
+    dom: &Dom,
+    styles: &HashMap<NodeId, Rc<ComputedStyle>>,
+    node: NodeId,
+) -> Option<LayoutBox> {
     let style = styles.get(&node)?;
     if style.display == Display::None {
         return None;
@@ -437,11 +465,21 @@ pub(crate) fn build_box_for_element(
             list_item_start,
         ))
     } else {
+        // An inline `<a>` (a top-level element in streaming mode) carries its href down to
+        // its text, as it would inside a line.
+        let context = InlineContext {
+            link: (style.display == Display::Inline)
+                .then(|| link_href(dom, node))
+                .flatten(),
+            ..InlineContext::default()
+        };
         let mut spans = Vec::new();
         push_before_content(styles, node, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
-                ChildKind::Inline => collect_spans(dom, styles, child, &mut spans),
+                ChildKind::Inline => {
+                    collect_spans_in_context(dom, styles, child, &context, &mut spans)
+                }
                 ChildKind::Whitespace => {
                     push_collapsible_whitespace(dom, styles, child, &mut spans)
                 }
@@ -979,7 +1017,9 @@ fn build_inline_block_box(
         BoxContent::Inline(spans)
     };
 
-    Some(LayoutBox::for_node(node, content))
+    let mut b = LayoutBox::for_node(node, content);
+    b.link = link_href(dom, node);
+    Some(b)
 }
 
 /// If `node` is an `<a>` element with an `href`, its value.
@@ -1072,7 +1112,15 @@ fn collect_table_rows(
     out: &mut Vec<TableRow>,
     out_caption: &mut Option<NodeId>,
 ) {
-    collect_table_rows_in_section(dom, styles, node, TableSection::Body, out, out_caption);
+    collect_table_rows_in_section(
+        dom,
+        styles,
+        node,
+        TableSection::Body,
+        None,
+        out,
+        out_caption,
+    );
     // HTML4 required `<tfoot>` to be written before `<tbody>`. Now that the section is
     // known, it is moved to the end regardless of source order. The sort is stable, so the
     // order within a section is preserved.
@@ -1128,12 +1176,14 @@ fn table_child_kind(
     }
 }
 
-/// The body of [`collect_table_rows`]. `section` is the section indicated by "the container we are currently in".
+/// The body of [`collect_table_rows`]. `section` is the section indicated by "the container
+/// we are currently in", and `group` is that container's element (`None` for the table itself).
 fn collect_table_rows_in_section(
     dom: &Dom,
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
     section: TableSection,
+    group: Option<NodeId>,
     out: &mut Vec<TableRow>,
     out_caption: &mut Option<NodeId>,
 ) {
@@ -1143,25 +1193,33 @@ fn collect_table_rows_in_section(
     for child in dom.children(node) {
         match table_child_kind(dom, styles, child) {
             TableChild::Row => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
-                out.push(build_table_row(dom, styles, child, section));
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
+                out.push(build_table_row(dom, styles, child, section, group));
             }
             TableChild::Caption => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
                 if out_caption.is_none() {
                     *out_caption = Some(child);
                 }
             }
             TableChild::Section(child_section) => {
-                flush_anonymous_row(dom, styles, &mut pending, section, out);
-                collect_table_rows_in_section(dom, styles, child, child_section, out, out_caption);
+                flush_anonymous_row(dom, styles, &mut pending, section, group, out);
+                collect_table_rows_in_section(
+                    dom,
+                    styles,
+                    child,
+                    child_section,
+                    Some(child),
+                    out,
+                    out_caption,
+                );
             }
             TableChild::Content => pending.push(child),
             TableChild::Ignored => {}
         }
     }
 
-    flush_anonymous_row(dom, styles, &mut pending, section, out);
+    flush_anonymous_row(dom, styles, &mut pending, section, group, out);
 }
 
 /// Gather the accumulated "children that are not rows" into one anonymous `table-row` and
@@ -1172,6 +1230,7 @@ fn flush_anonymous_row(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     pending: &mut Vec<NodeId>,
     section: TableSection,
+    group: Option<NodeId>,
     out: &mut Vec<TableRow>,
 ) {
     if pending.is_empty() {
@@ -1192,6 +1251,7 @@ fn flush_anonymous_row(
         node: None,
         cells,
         section,
+        group,
     });
 }
 
@@ -1283,12 +1343,14 @@ fn build_table_row(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     row_node: NodeId,
     section: TableSection,
+    group: Option<NodeId>,
 ) -> TableRow {
     let children: Vec<NodeId> = dom.children(row_node).collect();
     TableRow {
         node: Some(row_node),
         cells: build_row_cells(dom, styles, &children),
         section,
+        group,
     }
 }
 
@@ -1435,6 +1497,7 @@ fn collect_spans_in_context(
                 out.push(InlineSpan::atomic(
                     node,
                     LayoutBox::for_node(node, BoxContent::Inline(Vec::new())),
+                    context,
                 ));
                 return;
             }
@@ -1444,7 +1507,7 @@ fn collect_spans_in_context(
             if styles.get(&node).map(|s| s.display) == Some(Display::InlineFlex) {
                 if let Some(mut atomic) = build_box_for_element(dom, styles, node) {
                     atomic.marker = None;
-                    out.push(InlineSpan::atomic(node, atomic));
+                    out.push(InlineSpan::atomic(node, atomic, context));
                 }
                 return;
             }
@@ -1453,7 +1516,7 @@ fn collect_spans_in_context(
             if styles.get(&node).map(|s| s.display) == Some(Display::InlineBlock) {
                 if let Some(mut atomic) = build_inline_block_box(dom, styles, node) {
                     atomic.marker = None;
-                    out.push(InlineSpan::atomic(node, atomic));
+                    out.push(InlineSpan::atomic(node, atomic, context));
                 }
                 return;
             }
@@ -1949,6 +2012,48 @@ mod tests {
         assert_eq!(first_cell_text(&table.rows[0].cells[0].content), "Name");
         assert_eq!(first_cell_text(&table.rows[1].cells[0].content), "Apple");
         assert_eq!(first_cell_text(&table.rows[2].cells[0].content), "Banana");
+    }
+
+    #[test]
+    fn table_rows_record_the_row_group_they_sit_in() {
+        // The row group's background is painted behind its rows, so each row keeps the
+        // `<thead>`/`<tbody>`/`<tfoot>` element it came from (tfoot moves to the end).
+        let dom = html::parse(
+            br#"<table>
+                <thead><tr><th>H</th></tr></thead>
+                <tfoot><tr><td>F</td></tr></tfoot>
+                <tbody><tr><td>A</td></tr><tr><td>A</td></tr></tbody>
+                <tbody><tr><td>B</td></tr></tbody>
+            </table>"#,
+        );
+        let ua = user_agent_stylesheet();
+        let styles = compute_styles(&dom, &ua, &Stylesheet::default());
+        let tree = build_box_tree(&dom, &styles);
+
+        let table_node = find(&dom, dom.document(), "table").expect("table not found");
+        let table_box = find_box(&tree, table_node).expect("table box not found");
+        let BoxContent::Table(table) = &table_box.content else {
+            panic!("expected a table box");
+        };
+        let groups: Vec<NodeId> = dom
+            .children(table_node)
+            .filter(|&c| matches!(dom.node(c).data, NodeData::Element { .. }))
+            .collect();
+        let [thead, tfoot, tbody1, tbody2] = groups[..] else {
+            panic!("expected four row groups, got {groups:?}");
+        };
+
+        let row_groups: Vec<Option<NodeId>> = table.rows.iter().map(|row| row.group).collect();
+        assert_eq!(
+            row_groups,
+            vec![
+                Some(thead),
+                Some(tbody1),
+                Some(tbody1),
+                Some(tbody2),
+                Some(tfoot)
+            ]
+        );
     }
 
     #[test]

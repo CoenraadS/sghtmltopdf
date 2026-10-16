@@ -939,10 +939,27 @@ pub(super) struct LinkArea {
     pub y1: f32,
 }
 
-/// Walk the boxes on a page and collect the `/Link` annotation rectangles from the text runs
-/// belonging to an `<a href>`. Consecutive runs of the same link within a line are merged
-/// into one rectangle, and what wrapped onto another line becomes a separate rectangle.
+/// Walk the boxes on a page and collect the `/Link` annotation rectangles of its `<a href>`s.
+///
+/// An `<a>` with a box of its own (`display: block`, `flex`, `inline-block` and so on, or a
+/// flex or grid item) gives its border box, once per page it is split across. An inline `<a>`
+/// gives the text runs and atomic boxes (`<img>`, `inline-block`) inside it: consecutive ones
+/// of the same link within a line are merged into one rectangle, and what wrapped onto another
+/// line becomes a separate rectangle.
 pub(super) fn collect_link_areas(b: &LaidOutBox, settings: &PageSettings, out: &mut Vec<LinkArea>) {
+    if let Some(href) = &b.link {
+        let border_box = b.layout.border_box();
+        if border_box.width > 0.0 && border_box.height > 0.0 {
+            let x0 = settings.margin.left + border_box.x;
+            out.push(LinkArea {
+                href: href.clone(),
+                x0,
+                y0: to_pdf_y(settings, border_box.y + border_box.height),
+                x1: x0 + border_box.width,
+                y1: to_pdf_y(settings, border_box.y),
+            });
+        }
+    }
     match &b.content {
         LaidOutContent::Blocks(children) | LaidOutContent::Flex(children) => {
             for child in children {
@@ -976,29 +993,61 @@ pub(super) fn collect_link_areas(b: &LaidOutBox, settings: &PageSettings, out: &
     }
 }
 
+/// A run or atomic box of a line, as [`push_line_link_areas`] merges them.
+struct LinePiece<'a> {
+    link: Option<&'a Rc<str>>,
+    /// The rectangle in PDF coordinates.
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
 fn push_line_link_areas(line: &LineBox, settings: &PageSettings, out: &mut Vec<LinkArea>) {
-    let mut current: Option<LinkArea> = None;
+    // The runs and the atomic boxes of the line in visual order.
+    let mut pieces: Vec<LinePiece<'_>> = Vec::with_capacity(line.runs.len() + line.atomics.len());
     for run in &line.runs {
-        let Some(href) = &run.link else {
+        let x0 = settings.margin.left + line.rect.x + run.x_offset;
+        // The annotation's height is the ascent-to-descent range, relative to the run's
+        // baseline (including any `vertical-align` shift).
+        let baseline_y = to_pdf_y(settings, line.rect.y + line.baseline) + run.baseline_shift;
+        pieces.push(LinePiece {
+            link: run.link.as_ref(),
+            x0,
+            y0: baseline_y - run.descent,
+            x1: x0 + run.width,
+            y1: baseline_y + run.ascent,
+        });
+    }
+    for atomic in &line.atomics {
+        let border_box = atomic.content.layout.border_box();
+        let x0 = settings.margin.left + border_box.x;
+        pieces.push(LinePiece {
+            link: atomic.link.as_ref(),
+            x0,
+            y0: to_pdf_y(settings, border_box.y + border_box.height),
+            x1: x0 + border_box.width,
+            y1: to_pdf_y(settings, border_box.y),
+        });
+    }
+    if !line.atomics.is_empty() {
+        pieces.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+    }
+
+    let mut current: Option<LinkArea> = None;
+    for piece in pieces {
+        let Some(href) = piece.link else {
             if let Some(area) = current.take() {
                 out.push(area);
             }
             continue;
         };
-        let x0 = settings.margin.left + line.rect.x + run.x_offset;
-        let x1 = x0 + run.width;
-        // The annotation's height is the ascent-to-descent range, relative to the run's
-        // baseline (including any `vertical-align` shift).
-        let baseline_y = to_pdf_y(settings, line.rect.y + line.baseline) + run.baseline_shift;
-        let y0 = baseline_y - run.descent;
-        let y1 = baseline_y + run.ascent;
-
         match &mut current {
             // The rectangle is extended while the same link continues.
             Some(area) if area.href == *href => {
-                area.x1 = area.x1.max(x1);
-                area.y0 = area.y0.min(y0);
-                area.y1 = area.y1.max(y1);
+                area.x1 = area.x1.max(piece.x1);
+                area.y0 = area.y0.min(piece.y0);
+                area.y1 = area.y1.max(piece.y1);
             }
             _ => {
                 if let Some(area) = current.take() {
@@ -1006,10 +1055,10 @@ fn push_line_link_areas(line: &LineBox, settings: &PageSettings, out: &mut Vec<L
                 }
                 current = Some(LinkArea {
                     href: href.clone(),
-                    x0,
-                    y0,
-                    x1,
-                    y1,
+                    x0: piece.x0,
+                    y0: piece.y0,
+                    x1: piece.x1,
+                    y1: piece.y1,
                 });
             }
         }
@@ -1599,6 +1648,9 @@ fn render_box_with_style_inner(
             } else {
                 Vec::new()
             };
+            // Row groups are the layer below rows and cells (CSS2.1 17.5.1), so every group is
+            // painted before the first row.
+            render_row_group_backgrounds(content, &table.rows, styles, settings, alpha_gs_names);
             for row in &table.rows {
                 render_row_background(content, row, styles, settings, alpha_gs_names);
                 for cell in &row.cells {
@@ -1921,11 +1973,14 @@ fn render_box_decoration(
     render_border(content, layout, style, settings);
 }
 
-/// The number of steps in the blur approximation.
-const BOX_SHADOW_BLUR_STEPS: u32 = 4;
+/// The number of bands in the blur approximation.
+const BOX_SHADOW_BLUR_STEPS: u32 = 8;
 
 /// Draw the `box-shadow`s (call before the element's own background and borders). They are
-/// painted back to front so the first in the list ends up frontmost. `inset` is not supported.
+/// painted back to front so the first in the list ends up frontmost. An outer shadow is drawn
+/// outside the border edge only: it is clipped inside the border box, rounded by its
+/// `border-radius` (CSS Backgrounds 3, 7.1), so a box without a background shows what is
+/// behind it rather than the shadow. `inset` is not supported.
 fn render_box_shadows(
     content: &mut RenderTarget<'_>,
     layout: &Layout,
@@ -1939,23 +1994,55 @@ fn render_box_shadows(
     ),
     alpha_gs_names: &[String],
 ) {
-    if style.box_shadow.is_empty() {
+    // A shadow whose alpha rounds to 0 draws nothing, such as Tailwind's `0 0 #0000` layers.
+    let shadows: Vec<&ComputedBoxShadow> = style
+        .box_shadow
+        .iter()
+        .filter(|shadow| !shadow.inset && quantize_alpha_step(shadow.color.alpha) > 0)
+        .collect();
+    if shadows.is_empty() {
         return;
     }
     let border_box = layout.border_box();
-    for shadow in style.box_shadow.iter().rev() {
-        if shadow.inset {
-            continue;
-        }
+    let x0 = settings.margin.left + border_box.x;
+    let x1 = x0 + border_box.width;
+    let y_top = to_pdf_y(settings, border_box.y);
+    let y_bottom = to_pdf_y(settings, border_box.y + border_box.height);
+    // The clip is a rectangle reaching past every shadow with the border box cut out of it
+    // (even-odd).
+    let reach = shadows
+        .iter()
+        .map(|shadow| {
+            shadow.offset_x.abs().max(shadow.offset_y.abs())
+                + shadow.spread_radius.max(0.0)
+                + shadow.blur_radius
+        })
+        .fold(0.0, f32::max)
+        + 1.0;
+    content.save_state();
+    content.rect(
+        x0 - reach,
+        y_bottom - reach,
+        x1 - x0 + 2.0 * reach,
+        y_top - y_bottom + 2.0 * reach,
+    );
+    rounded_rect_path(content, x0, y_top, x1, y_bottom, radii);
+    content.clip_even_odd();
+    content.end_path();
+    for shadow in shadows.into_iter().rev() {
         render_single_box_shadow(content, border_box, shadow, settings, radii, alpha_gs_names);
     }
+    content.restore_state();
 }
 
-/// Draw one shadow. The blur is not a true Gaussian: it is approximated by overpainting
-/// concentric semi-transparent rectangles outside a core rectangle expanded by
-/// `spread-radius`, spreading out to `blur-radius` in `BOX_SHADOW_BLUR_STEPS` even steps,
-/// from the outermost (widest and faintest) to the innermost (closest to the core and
-/// strongest). The corner radii use the element's own (`radii`) unchanged, without growing.
+/// Draw one outer shadow. The shadow shape is the border box moved by the offset and grown by
+/// `spread-radius`, with its corner radii grown as the spec describes ([`spread_radii`]).
+/// The blur is not a true Gaussian: the edge is approximated by a linear ramp from the full
+/// colour at `blur-radius` inside the shape's edge to nothing at `blur-radius` outside it,
+/// about where the spec's Gaussian (standard deviation half the blur radius) fades out. The
+/// ramp is drawn as `BOX_SHADOW_BLUR_STEPS` bands of even width around a core. Each band is
+/// filled even-odd between its two outlines, so no point is painted twice and the shadow is
+/// never darker than its colour.
 fn render_single_box_shadow(
     content: &mut RenderTarget<'_>,
     border_box: Rect,
@@ -1969,11 +2056,11 @@ fn render_single_box_shadow(
     ),
     alpha_gs_names: &[String],
 ) {
-    if shadow.color.alpha <= 0.0 {
-        return;
-    }
-
-    let draw = |content: &mut RenderTarget<'_>, expand: f32, alpha: f32| {
+    let shape_radii = spread_radii(radii, shadow.spread_radius);
+    // The outline `grow` px outside the shadow shape's edge (inside it when negative), or
+    // `None` when a negative `spread-radius` or the blur's inner half leaves nothing of it.
+    let outline = |grow: f32| {
+        let expand = shadow.spread_radius + grow;
         let x0 = settings.margin.left + border_box.x + shadow.offset_x - expand;
         let x1 = settings.margin.left + border_box.x + border_box.width + shadow.offset_x + expand;
         let y_top = to_pdf_y(settings, border_box.y + shadow.offset_y - expand);
@@ -1981,11 +2068,17 @@ fn render_single_box_shadow(
             settings,
             border_box.y + border_box.height + shadow.offset_y + expand,
         );
-        // A known simplification: where a negative `spread-radius` degenerates the rectangle,
-        // that ring is not drawn (a zero or negative sized rectangle being meaningless).
-        if x1 <= x0 || y_top <= y_bottom {
+        (x1 > x0 && y_top > y_bottom)
+            .then(|| (x0, y_top, x1, y_bottom, grow_radii(shape_radii, grow)))
+    };
+    // Fill between the outlines at `outer` and `inner`, or all of `outer` with no `inner`.
+    let fill = |content: &mut RenderTarget<'_>, outer: f32, inner: Option<f32>, alpha: f32| {
+        if quantize_alpha_step(alpha) == 0 {
             return;
         }
+        let Some((x0, y_top, x1, y_bottom, outer_radii)) = outline(outer) else {
+            return;
+        };
         let use_alpha = alpha < 1.0;
         if use_alpha {
             content.save_state();
@@ -1996,28 +2089,93 @@ fn render_single_box_shadow(
             shadow.color.green as f32 / 255.0,
             shadow.color.blue as f32 / 255.0,
         );
-        rounded_rect_path(content, x0, y_top, x1, y_bottom, radii);
-        content.fill_nonzero();
+        rounded_rect_path(content, x0, y_top, x1, y_bottom, outer_radii);
+        if let Some((x0, y_top, x1, y_bottom, inner_radii)) = inner.and_then(outline) {
+            rounded_rect_path(content, x0, y_top, x1, y_bottom, inner_radii);
+            content.fill_even_odd();
+        } else {
+            content.fill_nonzero();
+        }
         if use_alpha {
             content.restore_state();
         }
     };
 
     if shadow.blur_radius <= 0.0 {
-        draw(content, shadow.spread_radius, shadow.color.alpha);
+        fill(content, 0.0, None, shadow.color.alpha);
         return;
     }
 
-    for step in (1..=BOX_SHADOW_BLUR_STEPS).rev() {
-        let expand =
-            shadow.spread_radius + shadow.blur_radius * step as f32 / BOX_SHADOW_BLUR_STEPS as f32;
-        let alpha = shadow.color.alpha * (BOX_SHADOW_BLUR_STEPS + 1 - step) as f32
-            / BOX_SHADOW_BLUR_STEPS as f32;
-        draw(content, expand, alpha);
+    let blur = shadow.blur_radius;
+    let band = 2.0 * blur / BOX_SHADOW_BLUR_STEPS as f32;
+    fill(content, -blur, None, shadow.color.alpha);
+    for step in 0..BOX_SHADOW_BLUR_STEPS {
+        let inner = -blur + band * step as f32;
+        // The ramp's value at the middle of the band.
+        let alpha = shadow.color.alpha * (1.0 - (step as f32 + 0.5) / BOX_SHADOW_BLUR_STEPS as f32);
+        fill(content, inner + band, Some(inner), alpha);
     }
-    // The core (spread only, at full alpha) is overpainted last, so the outline matches the
-    // blur-radius: 0 case exactly.
-    draw(content, shadow.spread_radius, shadow.color.alpha);
+}
+
+/// The corner radii of a shadow shape grown by `spread` (CSS Backgrounds 3, 7.1.1). A
+/// positive spread is added to each radius, except that a radius smaller than the spread
+/// takes only `1 + (r - 1)^3` of it, `r` being the ratio of the radius to the spread, so a
+/// square corner stays square. A negative spread shrinks the radii.
+fn spread_radii(
+    radii: (
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+    ),
+    spread: f32,
+) -> (
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+) {
+    let one = |r: f32| {
+        if spread > 0.0 && r < spread {
+            let ratio = r / spread;
+            r + spread * (1.0 + (ratio - 1.0).powi(3))
+        } else {
+            (r + spread).max(0.0)
+        }
+    };
+    let corner = |(rx, ry): CornerRadiusPx| (one(rx), one(ry));
+    (
+        corner(radii.0),
+        corner(radii.1),
+        corner(radii.2),
+        corner(radii.3),
+    )
+}
+
+/// The corner radii of an outline `grow` px outside a rounded shape (inside it when
+/// negative). A rounded corner follows the outline; a square corner stays square.
+fn grow_radii(
+    radii: (
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+        CornerRadiusPx,
+    ),
+    grow: f32,
+) -> (
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+    CornerRadiusPx,
+) {
+    let one = |r: f32| if r > 0.0 { (r + grow).max(0.0) } else { 0.0 };
+    let corner = |(rx, ry): CornerRadiusPx| (one(rx), one(ry));
+    (
+        corner(radii.0),
+        corner(radii.1),
+        corner(radii.2),
+        corner(radii.3),
+    )
 }
 
 /// The effective radii of one corner as px values (horizontal, vertical). A true circle has the two equal.
@@ -2450,6 +2608,58 @@ fn render_row_background(
     content.fill_nonzero();
     if use_alpha {
         content.restore_state();
+    }
+}
+
+/// Paint the `background-color` of each `<thead>`/`<tbody>`/`<tfoot>` behind the cells of its
+/// rows (CSS2.1 17.5.1, layer 3 of 6).
+///
+/// Each cell's border box is filled rather than the union of the rows: with
+/// `border-collapse: separate`, the `border-spacing` gaps always show the table's background.
+/// On a page fragment `rows` holds only the rows placed on that page (plus the repeated
+/// `<thead>` rows), so the fill covers only those.
+fn render_row_group_backgrounds(
+    content: &mut RenderTarget<'_>,
+    rows: &[LaidOutTableRow],
+    styles: &HashMap<NodeId, Rc<ComputedStyle>>,
+    settings: &PageSettings,
+    alpha_gs_names: &[String],
+) {
+    // The rows of a group are consecutive, so each run sharing a `group` is one fill.
+    for run in rows.chunk_by(|a, b| a.group == b.group) {
+        let Some(style) = run[0].group.and_then(|node| styles.get(&node)) else {
+            continue;
+        };
+        let color = style.background_color;
+        let cells: Vec<Rect> = run
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| cell.layout.border_box())
+            .filter(|b| b.width > 0.0 && b.height > 0.0)
+            .collect();
+        if color.alpha <= 0.0 || cells.is_empty() {
+            continue;
+        }
+        let use_alpha = color.alpha < 1.0;
+        if use_alpha {
+            content.save_state();
+            apply_fill_alpha(content, color.alpha, alpha_gs_names);
+        }
+        content.set_fill_rgb(
+            color.red as f32 / 255.0,
+            color.green as f32 / 255.0,
+            color.blue as f32 / 255.0,
+        );
+        // All the cells go into one path and one fill, so a translucent colour is not doubled
+        // where collapsed borders make neighbouring cells overlap.
+        for b in cells {
+            let y_bottom = to_pdf_y(settings, b.y + b.height);
+            content.rect(settings.margin.left + b.x, y_bottom, b.width, b.height);
+        }
+        content.fill_nonzero();
+        if use_alpha {
+            content.restore_state();
+        }
     }
 }
 
@@ -4728,6 +4938,25 @@ mod tests {
     }
 
     #[test]
+    fn spread_radii_grow_a_box_shadow_shape_as_the_spec_describes() {
+        let radii = ((0.0, 0.0), (10.0, 10.0), (2.0, 6.0), (8.0, 8.0));
+        let (tl, tr, br, bl) = spread_radii(radii, 4.0);
+        // A square corner stays square.
+        assert_eq!(tl, (0.0, 0.0));
+        // A radius at least the spread grows by the spread.
+        assert_eq!(tr, (14.0, 14.0));
+        assert_eq!(bl, (12.0, 12.0));
+        // A smaller one by 1 + (r - 1)^3 of it: r = 0.5 gives 0.875.
+        assert_eq!(br, (2.0 + 4.0 * 0.875, 10.0));
+        // A negative spread shrinks them, down to square.
+        let (tl, tr, br, bl) = spread_radii(radii, -4.0);
+        assert_eq!(
+            [tl, tr, br, bl],
+            [(0.0, 0.0), (6.0, 6.0), (0.0, 2.0), (4.0, 4.0)]
+        );
+    }
+
+    #[test]
     fn background_color_adds_fill_drawing_to_content_stream() {
         let ua = user_agent_stylesheet();
         let fonts = test_fonts();
@@ -5124,6 +5353,192 @@ mod tests {
             text.contains("0.78431374 0.78431374 0.78431374 rg"),
             "the explicit cell background-color should be painted"
         );
+    }
+
+    /// Encode each page of `html_src` on its own and return its inflated content streams.
+    fn page_streams(html_src: &str, css: &str) -> Vec<String> {
+        let dom = html::parse(html_src.as_bytes());
+        let ua = user_agent_stylesheet();
+        let styles = compute_styles(&dom, &ua, &parse_stylesheet(css));
+        let fonts = test_fonts();
+        let settings = PageSettings::default();
+        let pages = paginate_document(&dom, &styles, &fonts, &settings);
+        pages
+            .iter()
+            .map(|page| {
+                let bytes = encode_pdf(
+                    std::slice::from_ref(page),
+                    &styles,
+                    &HashMap::new(),
+                    &fonts,
+                    &settings,
+                );
+                String::from_utf8_lossy(&decompressed_stream_bytes(&bytes)).into_owned()
+            })
+            .collect()
+    }
+
+    /// The `re` rectangles (`[x, y, w, h]`) of every fill whose colour is set by `rg_line`
+    /// (such as `"1 0 0 rg"`), one `Vec` per fill, in stream order, with the line index of the
+    /// colour operator.
+    fn fills_of(text: &str, rg_line: &str) -> Vec<(usize, Vec<[f32; 4]>)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut out = Vec::new();
+        for (i, _) in lines.iter().enumerate().filter(|(_, l)| **l == rg_line) {
+            let mut rects = Vec::new();
+            for line in &lines[i + 1..] {
+                if let Some(args) = line.strip_suffix(" re") {
+                    let v: Vec<f32> = args.split(' ').map(|n| n.parse().unwrap()).collect();
+                    rects.push([v[0], v[1], v[2], v[3]]);
+                } else if *line == "f" {
+                    break;
+                }
+            }
+            out.push((i, rects));
+        }
+        out
+    }
+
+    #[test]
+    fn row_group_backgrounds_are_painted_behind_their_rows_and_cells() {
+        // CSS2.1 17.5.1: row groups are painted before rows, and rows before cells. The tfoot
+        // colour comes from the legacy `bgcolor` attribute.
+        let html_src = r##"<table>
+            <thead><tr><th>H</th><th>H</th></tr></thead>
+            <tbody>
+                <tr><td>a</td><td>a</td></tr>
+                <tr class="row"><td>b</td><td class="cell">b</td></tr>
+            </tbody>
+            <tfoot bgcolor="#0000ff"><tr><td>f</td><td>f</td></tr></tfoot>
+        </table>"##;
+        let css = "table { border-spacing: 0 } td, th { height: 30px } \
+                   thead { background: rgb(255, 0, 0) } \
+                   tbody { background: rgb(0, 255, 0) } \
+                   tr.row { background: rgb(255, 255, 0) } \
+                   td.cell { background: rgb(0, 255, 255) }";
+        let streams = page_streams(html_src, css);
+        assert_eq!(streams.len(), 1);
+        let text = &streams[0];
+
+        let thead = fills_of(text, "1 0 0 rg");
+        let tbody = fills_of(text, "0 1 0 rg");
+        let tfoot = fills_of(text, "0 0 1 rg");
+        let row = fills_of(text, "1 1 0 rg");
+        let cell = fills_of(text, "0 1 1 rg");
+        for (name, fills, cells) in [
+            ("thead", &thead, 2),
+            ("tbody", &tbody, 4),
+            ("tfoot", &tfoot, 2),
+        ] {
+            assert_eq!(fills.len(), 1, "{name} should be painted once:\n{text}");
+            assert_eq!(fills[0].1.len(), cells, "{name} covers each of its cells");
+        }
+        // Every rectangle of a group is a 30px-high cell in that group's band (the content
+        // stream is in CSS px): the tbody's four cells stack between the thead and the tfoot.
+        let tops = |fills: &[(usize, Vec<[f32; 4]>)]| -> Vec<f32> {
+            fills[0].1.iter().map(|r| r[1] + r[3]).collect()
+        };
+        assert!(tbody[0].1.iter().all(|r| (r[3] - 30.0).abs() < 0.01));
+        let thead_bottom = thead[0].1[0][1];
+        let tfoot_top = tops(&tfoot)[0];
+        assert!(tops(&tbody).iter().all(|&t| t <= thead_bottom + 0.01));
+        assert!(tbody[0].1.iter().all(|r| r[1] >= tfoot_top - 0.01));
+
+        // All three groups are painted before the row and the cell on top of them.
+        let last_group = [&thead, &tbody, &tfoot]
+            .iter()
+            .map(|f| f[0].0)
+            .max()
+            .unwrap();
+        assert_eq!(row.len(), 1, "the row background is still painted");
+        assert_eq!(cell.len(), 1, "the cell background is still painted");
+        assert!(last_group < row[0].0 && row[0].0 < cell[0].0, "{text}");
+    }
+
+    #[test]
+    fn row_group_background_leaves_the_border_spacing_to_the_table() {
+        // With `border-collapse: separate`, the gaps between cells always show the table's
+        // background (CSS2.1 17.5.1), so the row group fills each cell rather than the band.
+        let html_src = r#"<table><tbody>
+            <tr><td>a</td><td>a</td></tr>
+            <tr><td>b</td><td>b</td></tr>
+        </tbody></table>"#;
+        let css = "table { border-spacing: 8px } td { width: 40px; height: 40px } \
+                   tbody { background: rgb(0, 255, 0) }";
+        let streams = page_streams(html_src, css);
+        let fills = fills_of(&streams[0], "0 1 0 rg");
+        assert_eq!(fills.len(), 1);
+        let rects = &fills[0].1;
+        assert_eq!(rects.len(), 4, "one rectangle per cell: {rects:?}");
+        let mut xs: Vec<f32> = rects.iter().map(|r| r[0]).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup();
+        let mut ys: Vec<f32> = rects.iter().map(|r| r[1]).collect();
+        ys.sort_by(f32::total_cmp);
+        ys.dedup();
+        // The second column and row start one cell plus the 8px gap later.
+        assert_eq!(xs.len(), 2);
+        assert_eq!(ys.len(), 2);
+        assert!(
+            (xs[1] - xs[0] - (rects[0][2] + 8.0)).abs() < 0.01,
+            "{rects:?}"
+        );
+        assert!(
+            (ys[1] - ys[0] - (rects[0][3] + 8.0)).abs() < 0.01,
+            "{rects:?}"
+        );
+    }
+
+    #[test]
+    fn row_group_background_on_a_split_table_covers_only_the_rows_on_each_page() {
+        // Each page's fragment paints the tbody behind the body rows placed on that page only,
+        // and the repeated thead rows get the thead background on every page.
+        let rows: String = (0..60).map(|i| format!("<tr><td>{i}</td></tr>")).collect();
+        let html_src =
+            format!("<table><thead><tr><th>H</th></tr></thead><tbody>{rows}</tbody></table>");
+        let css = "table { border-spacing: 0 } td, th { height: 40px } \
+                   thead { background: rgb(255, 0, 0) } \
+                   tbody { background: rgb(0, 255, 0) }";
+        let streams = page_streams(&html_src, css);
+        assert!(
+            streams.len() >= 3,
+            "the table should split over several pages"
+        );
+
+        let settings = PageSettings::default();
+        let content_bottom = settings.margin.bottom;
+        let mut body_cells = 0;
+        for (page, text) in streams.iter().enumerate() {
+            let thead = fills_of(text, "1 0 0 rg");
+            let tbody = fills_of(text, "0 1 0 rg");
+            assert_eq!(
+                thead.len(),
+                1,
+                "page {page}: the thead repeats with its background"
+            );
+            assert_eq!(tbody.len(), 1, "page {page}");
+            // One 40px rectangle per body row on this page, stacked right below the repeated
+            // thead row and none past the bottom of the page's content area.
+            let rects = &tbody[0].1;
+            let thead_bottom = thead[0].1[0][1];
+            assert!(
+                rects.iter().all(|r| (r[3] - 40.0).abs() < 0.01),
+                "page {page}"
+            );
+            for (i, r) in rects.iter().enumerate() {
+                let expected_top = thead_bottom - 40.0 * i as f32;
+                assert!(
+                    (r[1] + r[3] - expected_top).abs() < 0.01,
+                    "page {page}: {rects:?}"
+                );
+            }
+            assert!(
+                rects.iter().all(|r| r[1] >= content_bottom - 0.01),
+                "page {page}"
+            );
+            body_cells += rects.len();
+        }
+        assert_eq!(body_cells, 60, "every body row is painted exactly once");
     }
 
     /// Convert the given HTML/CSS to PDF and return the number of fill (`f`) operators in the
@@ -5831,6 +6246,99 @@ mod tests {
     fn an_anchor_without_href_is_not_a_link() {
         let areas = link_areas_of(r#"<p><a name="x">anchor</a></p>"#, "body { margin: 0; }");
         assert!(areas.is_empty(), "{areas:?}");
+    }
+
+    #[test]
+    fn an_anchor_with_a_box_of_its_own_is_linked_over_its_border_box() {
+        // `display: block`, `flex` and `inline-block` anchors, and an anchor that is a flex
+        // item, used to produce no area: only text runs inside an inline `<a>` carried a link.
+        for (html_src, href) in [
+            (
+                r#"<a style="display: block" href="https://e.com/block">block</a>"#,
+                "https://e.com/block",
+            ),
+            (
+                r#"<a style="display: flex" href="https://e.com/flex">flex <span>x</span></a>"#,
+                "https://e.com/flex",
+            ),
+            (
+                r#"<p><a style="display: inline-block" href="https://e.com/ib">ib</a></p>"#,
+                "https://e.com/ib",
+            ),
+            (
+                r#"<p><a style="display: inline-flex" href="https://e.com/if">if</a></p>"#,
+                "https://e.com/if",
+            ),
+            (
+                r#"<div style="display: flex">text <a href="https://e.com/item">item</a></div>"#,
+                "https://e.com/item",
+            ),
+        ] {
+            let areas = link_areas_of(html_src, "body { margin: 0; }");
+            assert_eq!(areas.len(), 1, "{html_src}: {areas:?}");
+            assert_eq!(&*areas[0].href, href);
+            assert!(areas[0].x1 > areas[0].x0 && areas[0].y1 > areas[0].y0);
+        }
+    }
+
+    #[test]
+    fn a_block_anchor_area_is_its_border_box() {
+        let areas = link_areas_of(
+            r#"<a href="https://e.com" style="display: block; width: 100px; height: 40px; padding: 5px; border: 2px solid; margin-left: 10px">x</a>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(areas.len(), 1);
+        let settings = PageSettings::default();
+        let area = &areas[0];
+        assert!(
+            (area.x0 - (settings.margin.left + 10.0)).abs() < 0.01,
+            "{area:?}"
+        );
+        assert!((area.x1 - area.x0 - 114.0).abs() < 0.01, "{area:?}");
+        assert!((area.y1 - area.y0 - 54.0).abs() < 0.01, "{area:?}");
+        assert!(
+            (area.y1 - to_pdf_y(&settings, 0.0)).abs() < 0.01,
+            "{area:?}"
+        );
+    }
+
+    #[test]
+    fn a_box_inside_an_inline_anchor_joins_the_area_of_its_text() {
+        // An `<img>` or `inline-block` inside an inline `<a>` is part of the link, merged
+        // with the text around it on the same line.
+        let areas = link_areas_of(
+            r#"<p>see <a href="https://e.com">the <span style="display: inline-block; width: 30px; height: 30px"></span> mark</a> here</p>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(areas.len(), 1, "{areas:?}");
+        // The 30px box is taller than the text, so the area reaches its height.
+        assert!(areas[0].y1 - areas[0].y0 >= 30.0, "{areas:?}");
+
+        let alone = link_areas_of(
+            r#"<p><a href="https://e.com"><span style="display: inline-block; width: 30px; height: 30px"></span></a></p>"#,
+            "body { margin: 0; }",
+        );
+        assert_eq!(alone.len(), 1, "{alone:?}");
+        assert!((alone[0].x1 - alone[0].x0 - 30.0).abs() < 0.01, "{alone:?}");
+    }
+
+    #[test]
+    fn a_block_anchor_split_across_pages_is_linked_on_every_page() {
+        let paragraphs = "<p>line</p>".repeat(120);
+        let html_src =
+            format!(r#"<a style="display: block" href="https://e.com">{paragraphs}</a>"#);
+        let dom = html::parse(html_src.as_bytes());
+        let styles = compute_styles(&dom, &user_agent_stylesheet(), &parse_stylesheet(""));
+        let settings = PageSettings::default();
+        let pages = paginate_document(&dom, &styles, &test_fonts(), &settings);
+        assert!(pages.len() > 1, "the anchor should split across pages");
+        for (i, page) in pages.iter().enumerate() {
+            let mut areas = Vec::new();
+            for b in &page.boxes {
+                collect_link_areas(b, &settings, &mut areas);
+            }
+            assert_eq!(areas.len(), 1, "page {i}: {areas:?}");
+        }
     }
 
     #[test]

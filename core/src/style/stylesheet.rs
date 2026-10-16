@@ -11,7 +11,9 @@ use selectors::parser::{
     Combinator, Component, NthSelectorData, NthType, ParseRelative, Selector, SelectorList,
 };
 
-use super::custom_properties::parse_declaration_or_defer;
+use super::custom_properties::{
+    parse_declaration_or_defer, parse_property_rule_block, PropertyRegistration,
+};
 use super::font_face::{parse_font_face_block, FontFaceRule};
 use super::page_rule::{parse_page_rule_block, parse_page_selector, PageRule};
 use super::properties::PropertyDeclaration;
@@ -29,6 +31,7 @@ pub struct Stylesheet {
     pub rules: Vec<StyleRule>,
     pub font_faces: Vec<FontFaceRule>,
     pub page_rules: Vec<PageRule>,
+    pub(crate) property_registrations: Vec<PropertyRegistration>,
     /// Memo of the index [`Self::index`] builds.
     index: RefCell<Option<Rc<RuleIndex>>>,
 }
@@ -65,6 +68,7 @@ enum TopLevelRule {
     /// block-less `@layer a, b;`, give an empty Vec.
     Nested(Vec<TopLevelRule>),
     Page(PageRule),
+    Property(PropertyRegistration),
 }
 
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
@@ -75,14 +79,22 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut font_faces = Vec::new();
     let mut page_rules = Vec::new();
+    let mut property_registrations = Vec::new();
     for result in StyleSheetParser::new(&mut parser, &mut rule_parser).flatten() {
-        flatten_top_level_rule(result, &mut rules, &mut font_faces, &mut page_rules);
+        flatten_top_level_rule(
+            result,
+            &mut rules,
+            &mut font_faces,
+            &mut page_rules,
+            &mut property_registrations,
+        );
     }
 
     Stylesheet {
         rules,
         font_faces,
         page_rules,
+        property_registrations,
         index: RefCell::new(None),
     }
 }
@@ -92,6 +104,7 @@ fn flatten_top_level_rule(
     rules: &mut Vec<StyleRule>,
     font_faces: &mut Vec<FontFaceRule>,
     page_rules: &mut Vec<PageRule>,
+    property_registrations: &mut Vec<PropertyRegistration>,
 ) {
     match rule {
         // A rule with no declarations contributes to neither the cascade nor pseudo-element
@@ -103,9 +116,10 @@ fn flatten_top_level_rule(
         }
         TopLevelRule::FontFace(r) => font_faces.push(r),
         TopLevelRule::Page(r) => page_rules.push(r),
+        TopLevelRule::Property(r) => property_registrations.push(r),
         TopLevelRule::Nested(inner) => {
             for r in inner {
-                flatten_top_level_rule(r, rules, font_faces, page_rules);
+                flatten_top_level_rule(r, rules, font_faces, page_rules, property_registrations);
             }
         }
     }
@@ -296,7 +310,7 @@ impl<'i> RuleBodyItemParser<'i, StyleRuleBodyItem, ()> for StyleRuleBodyParser<'
     }
 }
 
-/// Recognises `@font-face`, `@media`, `@layer` and `@page`.
+/// Recognises `@font-face`, `@media`, `@layer`, `@page` and `@property`.
 enum TopLevelAtRulePrelude {
     FontFace,
     /// `applies` is what [`media_query_list_matches`] decided.
@@ -308,6 +322,7 @@ enum TopLevelAtRulePrelude {
     /// not kept (#20).
     Layer,
     Page(super::page_rule::PageSelector),
+    Property(Rc<str>),
 }
 
 impl<'i> AtRuleParser<'i> for TopLevelRuleParser {
@@ -334,6 +349,14 @@ impl<'i> AtRuleParser<'i> for TopLevelRuleParser {
         if name.eq_ignore_ascii_case("page") {
             let selector = parse_page_selector(input)?;
             return Ok(TopLevelAtRulePrelude::Page(selector));
+        }
+        if name.eq_ignore_ascii_case("property") {
+            let property_name = input.expect_ident_cloned()?;
+            input.expect_exhausted()?;
+            if !property_name.starts_with("--") || property_name.len() <= 2 {
+                return Err(input.new_custom_error(()));
+            }
+            return Ok(TopLevelAtRulePrelude::Property(Rc::from(&*property_name)));
         }
         Err(input.new_custom_error(()))
     }
@@ -365,6 +388,9 @@ impl<'i> AtRuleParser<'i> for TopLevelRuleParser {
             TopLevelAtRulePrelude::Page(selector) => {
                 Ok(TopLevelRule::Page(parse_page_rule_block(input, selector)))
             }
+            TopLevelAtRulePrelude::Property(name) => Ok(TopLevelRule::Property(
+                parse_property_rule_block(name, input)?,
+            )),
             // The contents of an `@media` block that did not match need only be skipped
             // (`input` is already scoped to this block, so returning without consuming
             // anything still lets the caller advance correctly to the end of the block).
