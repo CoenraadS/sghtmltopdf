@@ -256,6 +256,13 @@ pub struct InlineSpan {
     /// the computed style of the text node, which has inherited even the
     /// `position` of the block.
     pub relative_insets: Vec<RelativeInset>,
+    /// Whether this is text sitting directly in the block container, outside any inline
+    /// element: a text node, or text the container generates itself (its `::before`/`::after`,
+    /// or an inside list marker). Its computed style is the block's own
+    /// or a clone of it, including the block's `vertical-align` (a table cell's `middle`, say),
+    /// which applies to the box and must not shift the text within its line, so the run is
+    /// laid out at `baseline` (`layout::inline`).
+    pub outside_inline_element: bool,
 }
 
 /// The `top`/`right`/`bottom`/`left` specified on a `position: relative`
@@ -284,6 +291,14 @@ impl RelativeInset {
 impl InlineSpan {
     /// An ordinary text run (with no decoration from an enclosing inline element).
     fn text(node: NodeId, text: String) -> Self {
+        Self {
+            outside_inline_element: false,
+            ..Self::text_in_inline_context(node, text, &InlineContext::default())
+        }
+    }
+
+    /// Text the block container `node` generates itself, drawn with its own computed style.
+    fn block_text(node: NodeId, text: String) -> Self {
         Self::text_in_inline_context(node, text, &InlineContext::default())
     }
 
@@ -298,6 +313,7 @@ impl InlineSpan {
             link: context.link.clone(),
             background_color: context.background_color,
             relative_insets: context.relative_insets.clone(),
+            outside_inline_element: !context.inside_inline_element,
         }
     }
 
@@ -313,6 +329,7 @@ impl InlineSpan {
             link: context.link.clone(),
             background_color: RgbaColor::TRANSPARENT,
             relative_insets: Vec::new(),
+            outside_inline_element: false,
         }
     }
 
@@ -329,6 +346,7 @@ impl InlineSpan {
             link: None,
             background_color: RgbaColor::TRANSPARENT,
             relative_insets: Vec::new(),
+            outside_inline_element: false,
         }
     }
 }
@@ -345,6 +363,8 @@ struct InlineContext {
     /// What the enclosing `position: relative` inline elements specify,
     /// outermost first.
     relative_insets: Vec<RelativeInset>,
+    /// Whether any inline element encloses the node.
+    inside_inline_element: bool,
 }
 
 impl Default for InlineContext {
@@ -353,6 +373,7 @@ impl Default for InlineContext {
             link: None,
             background_color: RgbaColor::TRANSPARENT,
             relative_insets: Vec::new(),
+            inside_inline_element: false,
         }
     }
 }
@@ -460,7 +481,7 @@ fn build_element_box(
             ..InlineContext::default()
         };
         let mut spans = Vec::new();
-        push_before_content(styles, node, &mut spans);
+        push_before_content(styles, node, true, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
                 ChildKind::Inline => {
@@ -472,7 +493,7 @@ fn build_element_box(
                 ChildKind::Block | ChildKind::None => {}
             }
         }
-        push_after_content(styles, node, &mut spans);
+        push_after_content(styles, node, true, &mut spans);
         apply_first_letter(node, style, &mut spans);
         // A `Vec` reserves room for at least 4 elements on its first push. In a document with
         // many boxes holding a single text (table cells, say) that slack simply accumulates.
@@ -719,6 +740,7 @@ fn apply_first_letter(node: NodeId, style: &ComputedStyle, spans: &mut Vec<Inlin
             link: spans[span_index].link.clone(),
             background_color: spans[span_index].background_color,
             relative_insets: spans[span_index].relative_insets.clone(),
+            outside_inline_element: spans[span_index].outside_inline_element,
         },
     );
 }
@@ -748,7 +770,7 @@ fn apply_list_item_marker(
 
     if style.list_style_position == ListStylePosition::Inside {
         if let BoxContent::Inline(spans) = &mut b.content {
-            spans.insert(0, InlineSpan::text(node, format!("{text} ")));
+            spans.insert(0, InlineSpan::block_text(node, format!("{text} ")));
             return;
         }
     }
@@ -983,7 +1005,7 @@ fn build_inline_block_box(
     } else {
         let style = styles.get(&node)?;
         let mut spans = Vec::new();
-        push_before_content(styles, node, &mut spans);
+        push_before_content(styles, node, true, &mut spans);
         push_form_control_content(dom, styles, node, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
@@ -994,7 +1016,7 @@ fn build_inline_block_box(
                 ChildKind::Block | ChildKind::None => {}
             }
         }
-        push_after_content(styles, node, &mut spans);
+        push_after_content(styles, node, true, &mut spans);
         apply_first_letter(node, style, &mut spans);
         // A `Vec` reserves room for at least 4 elements on its first push. In a document with
         // many boxes holding a single text (table cells, say) that slack simply accumulates.
@@ -1509,6 +1531,7 @@ fn collect_spans_in_context(
             // follow are painted with it (when nested, the inner one wins; a simplification
             // of CSS background layering). An `<a href>` link is likewise carried down to the descendants.
             let mut context = context.clone();
+            context.inside_inline_element = true;
             if let Some(background) = styles
                 .get(&node)
                 .map(|s| s.background_color)
@@ -1524,43 +1547,57 @@ fn collect_spans_in_context(
             if let Some(inset) = styles.get(&node).and_then(|s| RelativeInset::of(s)) {
                 context.relative_insets.push(inset);
             }
-            push_before_content(styles, node, out);
+            push_before_content(styles, node, false, out);
             for child in dom.children(node) {
                 collect_spans_in_context(dom, styles, child, &context, out);
             }
-            push_after_content(styles, node, out);
+            push_after_content(styles, node, false, out);
         }
         _ => {}
     }
 }
 
 /// If `node` has `::before` generated content, push its spans along with the node ID used to
-/// look up the computed style (`node` itself).
+/// look up the computed style (`node` itself). `block_container` is whether `node` is the
+/// block container of the line (a table cell, an `inline-block`) rather than an inline
+/// element, whose generated content moves with it under its `vertical-align`.
 fn push_before_content(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
+    block_container: bool,
     out: &mut Vec<InlineSpan>,
 ) {
     if let Some(text) = styles
         .get(&node)
         .and_then(|s| s.pseudo_before_content.as_ref())
     {
-        out.push(InlineSpan::text(node, text.clone()));
+        out.push(if block_container {
+            InlineSpan::block_text(node, text.clone())
+        } else {
+            InlineSpan::text(node, text.clone())
+        });
     }
 }
 
 /// If `node` has `::after` generated content, push its spans along with the node ID used to
-/// look up the computed style (`node` itself).
+/// look up the computed style (`node` itself). `block_container` is whether `node` is the
+/// block container of the line (a table cell, an `inline-block`) rather than an inline
+/// element, whose generated content moves with it under its `vertical-align`.
 fn push_after_content(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
+    block_container: bool,
     out: &mut Vec<InlineSpan>,
 ) {
     if let Some(text) = styles
         .get(&node)
         .and_then(|s| s.pseudo_after_content.as_ref())
     {
-        out.push(InlineSpan::text(node, text.clone()));
+        out.push(if block_container {
+            InlineSpan::block_text(node, text.clone())
+        } else {
+            InlineSpan::text(node, text.clone())
+        });
     }
 }
 
