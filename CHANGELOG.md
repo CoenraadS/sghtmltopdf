@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `<br>` at the end of a block no longer adds an empty line after it. `text<br>` took two
+  lines and `<div><br></div>` was twice as tall as in browsers, where a trailing `<br>` only
+  ends its line (`text<br><br>` is two lines). A trailing `<br clear>` that moves below a float
+  (the old `<br clear="all">` clearfix) still ends the block at the float's bottom. The same
+  holds under `white-space: pre`, where a trailing newline or `<br>` (`<pre>text\n</pre>`)
+  added an empty line too.
 - Table cells are vertically centred by default, as in browsers. The UA stylesheet now has
   the HTML spec's `thead, tbody, tfoot, table > tr { vertical-align: middle }` and
   `tr, td, th { vertical-align: inherit }`, so a cell without its own `vertical-align` no

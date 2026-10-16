@@ -361,9 +361,9 @@ fn layout_inline_content_in_flow(
     // and boxes such as `<img>` accumulate separately into `current_runs`/`current_atomics`,
     // so these are held as x coordinates rather than indices, to apply the same rule to both.
     let mut word_boundaries: Vec<f32> = Vec::new();
-    // The line height demanded by a `<br>` when the previous item was a forced break.
-    // Used to add one empty line for a trailing `<br>`.
-    let mut trailing_break_height: Option<f32> = None;
+    // Whether the last item so far is a `<br>` whose `clear` moved the cursor below a float.
+    // Nothing else records that clearance, so the block would end above the float.
+    let mut cleared_by_trailing_break = false;
 
     for item in items {
         let (word, word_space_before) = match item {
@@ -371,14 +371,14 @@ fn layout_inline_content_in_flow(
                 chars,
                 space_before,
             } => {
-                trailing_break_height = None;
+                cleared_by_trailing_break = false;
                 (chars, space_before)
             }
             InlineItem::Atomic {
                 span_index,
                 space_before,
             } => {
-                trailing_break_height = None;
+                cleared_by_trailing_break = false;
                 let Some(span) = spans.get(span_index) else {
                     continue;
                 };
@@ -524,9 +524,10 @@ fn layout_inline_content_in_flow(
                 if let (Some(ctx), Some(clear)) =
                     (float_ctx, span_styles.get(style_index).map(|s| s.clear))
                 {
-                    cursor_y = ctx.clearance(clear, cursor_y);
+                    let cleared_y = ctx.clearance(clear, cursor_y);
+                    cleared_by_trailing_break = cleared_y > cursor_y;
+                    cursor_y = cleared_y;
                 }
-                trailing_break_height = Some(break_height);
                 continue;
             }
         };
@@ -685,16 +686,16 @@ fn layout_inline_content_in_flow(
             line_available_width,
             &word_boundaries,
         );
-    } else if let Some(break_height) = trailing_break_height {
-        // A trailing `<br>` leaves one empty line (the same behaviour as the major browsers).
-        let (left, _) = line_band(float_ctx, cursor_y, break_height, origin_x, available_width);
+    } else if cleared_by_trailing_break {
+        // A trailing `<br clear>` (the old `<br clear="all">` clearfix) ends the block at the
+        // float's bottom, as in browsers: a zero-height line at the cleared position.
         lines.push(finish_line(
             Vec::new(),
             Vec::new(),
             0.0,
-            left,
+            origin_x,
             cursor_y,
-            break_height,
+            0.0,
             fonts,
         ));
     }
@@ -1508,7 +1509,13 @@ fn layout_pre_content(
     let mut lines = Vec::new();
     let mut cursor_y = origin_y;
 
-    for segment in chars.split(|sc| sc.ch == '\n') {
+    // A newline (or `<br>`) at the very end ends the last line and does not start another, as
+    // in browsers, so the empty segment after it is dropped.
+    let mut segments: Vec<&[StyledChar]> = chars.split(|sc| sc.ch == '\n').collect();
+    if segments.len() > 1 && segments.last().is_some_and(|segment| segment.is_empty()) {
+        segments.pop();
+    }
+    for segment in segments {
         // The line height is approximated from the style of that line's first character
         // (or the IFC's first span if there is none) (a known simplification).
         let hint = segment
@@ -3031,14 +3038,20 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_br_leaves_one_empty_line() {
-        // The same behaviour as the major browsers.
-        let (_, spans, styles) = spans_for("a<br>", "");
+    fn a_trailing_br_ends_the_line_without_adding_one() {
+        // As in browsers: `a<br>` is one line, `a<br><br>` two and `<br>` alone one empty line.
         let fonts = dejavu_only();
-        let lines = layout_inline_content(&spans, &styles, &fonts, 5000.0, 0.0, 0.0, None);
+        let texts = |html: &str| {
+            let (_, spans, styles) = spans_for(html, "");
+            line_texts(&layout_inline_content(
+                &spans, &styles, &fonts, 5000.0, 0.0, 0.0, None,
+            ))
+        };
 
-        assert_eq!(line_texts(&lines), vec!["a", ""]);
-        assert!(lines[1].rect.height > 0.0);
+        assert_eq!(texts("a<br>"), vec!["a"]);
+        assert_eq!(texts("a<br><br>"), vec!["a", ""]);
+        assert_eq!(texts("<br>"), vec![""]);
+        assert_eq!(texts("<br><br>"), vec!["", ""]);
     }
 
     #[test]
@@ -3105,6 +3118,46 @@ mod tests {
             "the line after <br clear=left> must clear the float, got y={}",
             lines[1].rect.y
         );
+    }
+
+    #[test]
+    fn a_trailing_br_clear_ends_the_block_at_the_floats_bottom() {
+        // The old `<div><img align="left">text<br clear="all"></div>` clearfix: in browsers the
+        // block ends exactly at the float's bottom, without an extra line.
+        use crate::layout::float_ctx::FloatContext;
+        use crate::style::Float;
+
+        let (_, spans, styles) = spans_for("a<br clear=\"left\">", "");
+        let fonts = dejavu_only();
+        let mut ctx = FloatContext::new();
+        ctx.register(Float::Left, 0.0, 0.0, 50.0, 100.0);
+
+        let lines = layout_inline_content(&spans, &styles, &fonts, 500.0, 0.0, 0.0, Some(&ctx));
+        assert_eq!(line_texts(&lines), vec!["a", ""]);
+        let last = lines.last().expect("lines");
+        assert_eq!(last.rect.y + last.rect.height, 100.0);
+
+        // With nothing to clear, the trailing <br> adds no line.
+        let (_, spans, styles) = spans_for("a<br clear=\"left\">", "");
+        let lines = layout_inline_content(&spans, &styles, &fonts, 500.0, 0.0, 0.0, None);
+        assert_eq!(line_texts(&lines), vec!["a"]);
+    }
+
+    #[test]
+    fn a_trailing_newline_under_white_space_pre_ends_the_line_without_adding_one() {
+        let fonts = dejavu_only();
+        let texts = |html: &str| {
+            let (_, spans, styles) = spans_for(html, "p { white-space: pre; }");
+            line_texts(&layout_inline_content(
+                &spans, &styles, &fonts, 5000.0, 0.0, 0.0, None,
+            ))
+        };
+
+        assert_eq!(texts("a\n"), vec!["a"]);
+        assert_eq!(texts("a<br>"), vec!["a"]);
+        assert_eq!(texts("a\n\n"), vec!["a", ""]);
+        assert_eq!(texts("a\nb"), vec!["a", "b"]);
+        assert_eq!(texts("<br>"), vec![""]);
     }
 
     // ===== `vertical-align` (inline context) =====
