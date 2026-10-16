@@ -257,9 +257,10 @@ pub struct InlineSpan {
     /// `position` of the block.
     pub relative_insets: Vec<RelativeInset>,
     /// Whether this is text sitting directly in the block container, outside any inline
-    /// element. Its text node's computed style has cloned the block's `vertical-align` (a
-    /// table cell's `middle`, say), which applies to the cell and must not shift the text
-    /// within its line, so the run is laid out at `baseline` (`layout::inline`).
+    /// element: a text node, or the container's own `::before`/`::after` content. Its computed style is the block's own
+    /// or a clone of it, including the block's `vertical-align` (a table cell's `middle`, say),
+    /// which applies to the box and must not shift the text within its line, so the run is
+    /// laid out at `baseline` (`layout::inline`).
     pub outside_inline_element: bool,
 }
 
@@ -293,6 +294,11 @@ impl InlineSpan {
             outside_inline_element: false,
             ..Self::text_in_inline_context(node, text, &InlineContext::default())
         }
+    }
+
+    /// Text the block container `node` generates itself, drawn with its own computed style.
+    fn block_text(node: NodeId, text: String) -> Self {
+        Self::text_in_inline_context(node, text, &InlineContext::default())
     }
 
     /// An ordinary text run (carrying information inherited from an enclosing inline element).
@@ -474,7 +480,7 @@ fn build_element_box(
             ..InlineContext::default()
         };
         let mut spans = Vec::new();
-        push_before_content(styles, node, &mut spans);
+        push_before_content(styles, node, true, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
                 ChildKind::Inline => {
@@ -486,7 +492,7 @@ fn build_element_box(
                 ChildKind::Block | ChildKind::None => {}
             }
         }
-        push_after_content(styles, node, &mut spans);
+        push_after_content(styles, node, true, &mut spans);
         apply_first_letter(node, style, &mut spans);
         // A `Vec` reserves room for at least 4 elements on its first push. In a document with
         // many boxes holding a single text (table cells, say) that slack simply accumulates.
@@ -998,7 +1004,7 @@ fn build_inline_block_box(
     } else {
         let style = styles.get(&node)?;
         let mut spans = Vec::new();
-        push_before_content(styles, node, &mut spans);
+        push_before_content(styles, node, true, &mut spans);
         push_form_control_content(dom, styles, node, &mut spans);
         for &child in &child_ids {
             match child_kind(dom, styles, child) {
@@ -1009,7 +1015,7 @@ fn build_inline_block_box(
                 ChildKind::Block | ChildKind::None => {}
             }
         }
-        push_after_content(styles, node, &mut spans);
+        push_after_content(styles, node, true, &mut spans);
         apply_first_letter(node, style, &mut spans);
         // A `Vec` reserves room for at least 4 elements on its first push. In a document with
         // many boxes holding a single text (table cells, say) that slack simply accumulates.
@@ -1540,43 +1546,57 @@ fn collect_spans_in_context(
             if let Some(inset) = styles.get(&node).and_then(|s| RelativeInset::of(s)) {
                 context.relative_insets.push(inset);
             }
-            push_before_content(styles, node, out);
+            push_before_content(styles, node, false, out);
             for child in dom.children(node) {
                 collect_spans_in_context(dom, styles, child, &context, out);
             }
-            push_after_content(styles, node, out);
+            push_after_content(styles, node, false, out);
         }
         _ => {}
     }
 }
 
 /// If `node` has `::before` generated content, push its spans along with the node ID used to
-/// look up the computed style (`node` itself).
+/// look up the computed style (`node` itself). `block_container` is whether `node` is the
+/// block container of the line (a table cell, an `inline-block`) rather than an inline
+/// element, whose generated content moves with it under its `vertical-align`.
 fn push_before_content(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
+    block_container: bool,
     out: &mut Vec<InlineSpan>,
 ) {
     if let Some(text) = styles
         .get(&node)
         .and_then(|s| s.pseudo_before_content.as_ref())
     {
-        out.push(InlineSpan::text(node, text.clone()));
+        out.push(if block_container {
+            InlineSpan::block_text(node, text.clone())
+        } else {
+            InlineSpan::text(node, text.clone())
+        });
     }
 }
 
 /// If `node` has `::after` generated content, push its spans along with the node ID used to
-/// look up the computed style (`node` itself).
+/// look up the computed style (`node` itself). `block_container` is whether `node` is the
+/// block container of the line (a table cell, an `inline-block`) rather than an inline
+/// element, whose generated content moves with it under its `vertical-align`.
 fn push_after_content(
     styles: &HashMap<NodeId, Rc<ComputedStyle>>,
     node: NodeId,
+    block_container: bool,
     out: &mut Vec<InlineSpan>,
 ) {
     if let Some(text) = styles
         .get(&node)
         .and_then(|s| s.pseudo_after_content.as_ref())
     {
-        out.push(InlineSpan::text(node, text.clone()));
+        out.push(if block_container {
+            InlineSpan::block_text(node, text.clone())
+        } else {
+            InlineSpan::text(node, text.clone())
+        });
     }
 }
 

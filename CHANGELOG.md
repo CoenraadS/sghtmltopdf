@@ -54,9 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer sits at the top of a row made taller by another cell. Set
   `td { vertical-align: baseline }` to keep the previous alignment.
 - Text directly inside a table cell or `inline-block` with `vertical-align: middle`, `top` or
-  `bottom` is no longer shifted within its own line. The text took on the box's
+  `bottom` is no longer shifted within its own line, and neither is the box's own
+  `::before`/`::after` content. The text took on the box's
   `vertical-align`, which applies to the box itself, so each line grew taller than in
-  browsers (a table row of 14px text by about 2px).
+  browsers (a table row of 14px text by about 2px). Generated content of an inline element
+  still moves with that element.
 - An `<a href>` that generates a box of its own is now a clickable link (#113). Only text
   inside an inline `<a>` was linked, so an anchor with `display: block`, `flex`,
   `inline-block` or `inline-flex`, or one that is a flex or grid item (Tailwind's

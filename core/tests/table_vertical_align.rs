@@ -203,3 +203,33 @@ fn a_cells_vertical_align_does_not_make_its_text_line_taller() {
         );
     }
 }
+
+#[test]
+fn a_cells_generated_content_does_not_make_its_line_taller() {
+    // The cell's own ::before/::after is drawn with the cell's computed style, whose
+    // `vertical-align` applies to the cell, like the text directly in it.
+    let html_src = r#"<table><tr><td></td><td>b</td></tr></table>"#;
+    let row_height = |align: &str, pseudo: &str| {
+        let css = format!(
+            "body {{ margin: 0; }} td {{ vertical-align: {align}; }} \
+             td:first-child::{pseudo} {{ content: \"x\"; }}"
+        );
+        let (dom, laid) = layout(html_src, &css);
+        let mut tds = Vec::new();
+        find_all_tags(&dom, dom.document(), "td", &mut tds);
+        find_laid_out(&laid, tds[0])
+            .expect("cell not found")
+            .layout
+            .margin_box_height()
+    };
+    for pseudo in ["before", "after"] {
+        let baseline = row_height("baseline", pseudo);
+        for align in ["middle", "top", "bottom"] {
+            assert!(
+                (row_height(align, pseudo) - baseline).abs() < 0.01,
+                "::{pseudo} under {align}: {} vs baseline {baseline}",
+                row_height(align, pseudo)
+            );
+        }
+    }
+}
