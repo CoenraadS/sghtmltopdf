@@ -730,21 +730,22 @@ fn render_standalone_document(
     paginate_document(&dom, &styles, fonts, settings)
 }
 
-/// Rebuild the table of contents' pages until the page count converges.
-///
-/// It returns (the TOC's pages, the TOC document's styles). The TOC is an independent
+/// The table of contents' own laid-out pages and style map. The TOC is an independent
 /// document, so drawing it needs its own style map.
+type TocPages = (Vec<crate::layout::Page>, HashMap<NodeId, Rc<ComputedStyle>>);
+
+/// Rebuild the table of contents' pages until the page count converges.
 fn build_toc_pages<E>(
     headings: &[TocHeading],
     toc: &TocSettings,
     page_offset: usize,
     fonts: &FontCollection,
     settings: &PageSettings,
-) -> Result<(Vec<crate::layout::Page>, HashMap<NodeId, Rc<ComputedStyle>>), EngineError<E>> {
+) -> Result<TocPages, EngineError<E>> {
     const MAX_ROUNDS: usize = 3;
 
     let mut toc_page_count = 1;
-    let mut result = (Vec::new(), HashMap::new());
+    let mut result: TocPages = (Vec::new(), HashMap::new());
 
     for round in 0..MAX_ROUNDS {
         let numbering = PageNumberPlan::new(0, toc_page_count, 0, page_offset)?;
