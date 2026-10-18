@@ -24,7 +24,7 @@ use crate::style::{
 };
 
 use super::block::{
-    box_style, layout_box_with_forced_size, measure_box_with_forced_width,
+    box_style, clamp_used_width, layout_box_with_forced_size, measure_box_with_forced_width,
     replaced_auto_content_size, resolve_border, resolve_padding, LaidOutBox, PosCtx,
 };
 use super::box_tree::{BoxContent, FlexBox, LayoutBox};
@@ -226,6 +226,19 @@ pub(super) fn layout_taffy_subtree(
                         };
                     }
 
+                    // taffy can ask before applying `max-width` (a column's flex basis), but an
+                    // image's height follows its used width.
+                    let width = if matches!(item.content, BoxContent::Image(_)) {
+                        clamp_used_width(
+                            item_style,
+                            content_width,
+                            padding.left + padding.right,
+                            border.left + border.right,
+                            width,
+                        )
+                    } else {
+                        width
+                    };
                     let outer_width = width + pb_x;
                     if let Some(memo) = item.measured.height(width, outer_width) {
                         return memo;

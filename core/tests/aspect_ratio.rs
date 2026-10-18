@@ -588,6 +588,46 @@ fn a_flex_item_image_sized_by_its_attributes_keeps_its_ratio_under_max_width() {
 }
 
 #[test]
+fn a_column_flex_item_image_keeps_its_ratio_under_max_width() {
+    for (attrs, css) in [
+        (
+            r#"width="32" height="24""#,
+            "img { max-width: 16px; height: auto; }",
+        ),
+        ("", "img { width: 32px; max-width: 16px; }"),
+    ] {
+        let html_src = format!(
+            r#"<div class="col"><img src="{}" {attrs}></div>"#,
+            jpeg_data_uri()
+        );
+        let (dom, laid) = layout(
+            &html_src,
+            &format!(
+                "body {{ margin: 0; }} \
+                 .col {{ display: flex; flex-direction: column; align-items: flex-start; }} {css}"
+            ),
+        );
+        let content = content_box(&dom, &laid, "img", 0);
+        assert_eq!((content.width, content.height), (16.0, 12.0), "{css}");
+    }
+}
+
+#[test]
+fn a_column_flex_card_image_scales_down_to_the_card() {
+    let html_src = format!(
+        r#"<div class="card"><img src="{}" width="32" height="24"></div>"#,
+        jpeg_data_uri()
+    );
+    let (dom, laid) = layout(
+        &html_src,
+        "body { margin: 0; } .card { display: flex; flex-direction: column; width: 16px; } \
+         img { max-width: 100%; height: auto; }",
+    );
+    let content = content_box(&dom, &laid, "img", 0);
+    assert_eq!((content.width, content.height), (16.0, 12.0));
+}
+
+#[test]
 fn a_failed_image_still_reserves_the_space_of_its_size_attributes() {
     let (dom, laid) = layout(
         r#"<img src="data:image/png;base64,AAAA" width="50" height="50">"#,
