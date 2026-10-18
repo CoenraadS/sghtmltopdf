@@ -187,6 +187,8 @@ fn measure_cli(name: &str, input: &Path, args: &[String]) -> Measurement {
     let output =
         std::env::temp_dir().join(format!("sghtmltopdf-metrics-{}.pdf", std::process::id()));
     let started = Instant::now();
+    // Keep the child handle alive after wait: Windows needs it to query peak RSS.
+    // Command::status() would discard the handle before that query.
     let mut child = Command::new(BIN)
         .arg(input)
         .args(cli_font_args())
