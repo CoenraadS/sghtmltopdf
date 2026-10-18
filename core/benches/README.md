@@ -66,6 +66,12 @@ When a change is intentional (a layout fix that moves a page break, a smaller
 font subset), re-run with `--save-baseline` and commit the new
 `baseline.json` in the same PR so the diff documents the change.
 
+Peak RSS uses `getrusage` on Unix and `GetProcessMemoryInfo`'s peak working set on
+Windows. CLI child measurements retain the process handle until after the child
+exits. A failed or unsupported RSS query reports zero; allocation, page-count,
+PDF-size, and timing measurements remain available. RSS is compared only against
+a baseline from the same OS and architecture.
+
 CI (`.github/workflows/ci.yml`, job `bench`) runs this same gate against the
 committed baseline with `--no-time`, since a shared runner's clock is not
 comparable but its deterministic numbers are. The criterion targets run once
