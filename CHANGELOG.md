@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- New entries go in changelog.d/ as one file per change, not here (see changelog.d/README.md).
      `cargo xtask changelog release <version>` moves them into this file when releasing. -->
 
-## Unreleased
+## 0.6.0 - 2026-10-18
 
 ### Added
 
@@ -44,6 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, so it no longer counts as a late page stylesheet in streaming mode. Not covered:
   `<use href="#id">` pointing at a different `<svg>` in the page, and page CSS that sets
   `fill`/`stroke` on SVG elements.
+
+### Changed
+
+- Custom properties follow the cascade and inheritance (#75). `var()` used to be replaced
+  by text before parsing, with the last `--foo` declaration anywhere in the document
+  winning, so a property redefined on one element changed every other element and one
+  `border-none` in a Tailwind v4 page removed every border. Each element now gets its own
+  values: custom properties are cascaded by specificity, source order, `!important` and the
+  `style` attribute, inherited by descendants, and `var()` is substituted per element at
+  computed-value time, then parsed. A `var()` that cannot be resolved makes the declaration
+  invalid at computed-value time (the property takes its inherited or initial value).
+  `var()` fallbacks nest, `--a: var(--b)` references resolve whatever the order, reference
+  cycles are invalid, and `initial`/`inherit` work on custom properties. This works in
+  streaming mode as well. `@page` rules have no element, so `var()` there is resolved
+  against `:root`; custom properties declared inside an `@page` rule are not visible.
 
 ### Removed
 
@@ -213,21 +228,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its specified width, so its background and border stopped short of the overflowing
   columns; it now grows with them. A float or `inline-block` with `width: auto` likewise no
   longer shrinks below its min-content width, so a nowrap line is not wider than its box.
-
-### Changed
-
-- Custom properties follow the cascade and inheritance (#75). `var()` used to be replaced
-  by text before parsing, with the last `--foo` declaration anywhere in the document
-  winning, so a property redefined on one element changed every other element and one
-  `border-none` in a Tailwind v4 page removed every border. Each element now gets its own
-  values: custom properties are cascaded by specificity, source order, `!important` and the
-  `style` attribute, inherited by descendants, and `var()` is substituted per element at
-  computed-value time, then parsed. A `var()` that cannot be resolved makes the declaration
-  invalid at computed-value time (the property takes its inherited or initial value).
-  `var()` fallbacks nest, `--a: var(--b)` references resolve whatever the order, reference
-  cycles are invalid, and `initial`/`inherit` work on custom properties. This works in
-  streaming mode as well. `@page` rules have no element, so `var()` there is resolved
-  against `:root`; custom properties declared inside an `@page` rule are not visible.
 
 ## 0.5.1 - 2026-09-23
 

@@ -141,7 +141,7 @@ let pdf: Vec<u8> = engine.finish()?;
 
 ```toml
 [dependencies]
-sghtmltopdf = { version = "0.5", default-features = false, features = ["cli", "svg"] }
+sghtmltopdf = { version = "0.6", default-features = false, features = ["cli", "svg"] }
 ```
 
 ## 安定性
