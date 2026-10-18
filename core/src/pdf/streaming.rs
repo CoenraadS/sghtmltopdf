@@ -666,19 +666,17 @@ impl<S: Sink> StreamingPdfWriter<S> {
             self.write_chunk(id, &chunk)?;
         }
 
-        let logical_page_ids: Vec<Ref> = self
-            .cover_page_ids
-            .iter()
-            .chain(&self.toc_page_ids)
-            .chain(&self.body_page_ids)
-            .copied()
-            .collect();
-
         let mut chunk = Chunk::new();
         chunk
             .pages(self.pages_tree_id)
-            .kids(logical_page_ids.iter().copied())
-            .count(logical_page_ids.len() as i32);
+            .kids(
+                self.cover_page_ids
+                    .iter()
+                    .chain(&self.toc_page_ids)
+                    .chain(&self.body_page_ids)
+                    .copied(),
+            )
+            .count(self.page_ids.len() as i32);
         self.write_chunk(self.pages_tree_id, &chunk)?;
 
         // The named destinations are resolved here, once every page has been written.

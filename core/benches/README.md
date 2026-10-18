@@ -38,6 +38,19 @@ cargo bench -p sghtmltopdf -- --baseline main
 
 HTML reports land in `target/criterion/report/index.html`.
 
+For a local before/after allocation comparison, run the same filtered cases on
+both revisions and save separate JSON files (absolute output paths avoid Cargo's
+package working-directory differences). For example:
+
+```sh
+cargo bench -p sghtmltopdf --bench metrics -- --filter scale/paragraphs --runs 3 --no-time --no-fail --json <absolute-output-path>
+```
+
+Compare the two runs' `cases` by `name`, especially `alloc_count`, `alloc_bytes`,
+`peak_live_bytes`, `pages`, and `pdf_bytes`. These are fresh measurements; the
+printed baseline verdict is separate. `--no-fail` allows results to be saved even
+when the committed baseline differs. Small timing/RSS differences can be noise.
+
 ## The deterministic gate (`metrics`)
 
 Wall-clock time on a shared runner is noisy. The `metrics` target records the
