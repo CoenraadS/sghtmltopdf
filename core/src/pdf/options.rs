@@ -102,6 +102,8 @@ pub struct PdfOutputOptions {
     /// Write a tagged PDF (`--tagged`): a structure tree for accessibility, with page furniture
     /// marked as artifacts. Not supported with `Mode::Streaming`.
     pub tagged: bool,
+    /// Emit AcroForm fields for HTML form controls (false with `--disable-forms`).
+    pub forms: bool,
 }
 
 impl Default for PdfOutputOptions {
@@ -114,6 +116,7 @@ impl Default for PdfOutputOptions {
             header_line: false,
             footer_line: false,
             tagged: false,
+            forms: true,
         }
     }
 }

@@ -86,7 +86,7 @@ PDFのアウトライン(ブックマーク)自体が非対応のため、この
 | `--default-header` | ✅ 対応 | ページ名+番号の既定ヘッダ。簡易オプションのショートカット |
 | `--encoding <encoding>` | ✅ 対応 | 判定順は BOM > `--encoding` > `<meta charset>` > UTF-8 |
 | `--disable-external-links` / `--enable-external-links` | ✅ 対応 | リンク注釈 |
-| `--disable-forms` / `--enable-forms` | ❌ 非対応 | 入力可能なPDFフォーム(AcroForm)は作らない |
+| `--disable-forms` / `--enable-forms` | ✅ 対応 | 入力可能なPDFフォーム(AcroForm)。`--disable-forms`で見た目だけの描画にできる |
 | `--images` / `--no-images` | ✅ 対応 | |
 | `--disable-internal-links` / `--enable-internal-links` | ✅ 対応 | |
 | `-n, --disable-javascript` / `--enable-javascript` | ❌ 非対応 | JS実行は設計上の非目標 |

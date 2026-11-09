@@ -52,6 +52,9 @@ pub struct LaidOutBox {
     /// The href when this is an `<a href>` element's own box (see [`super::box_tree::LayoutBox::link`]).
     /// Its border box, on every page it is split across, becomes the link area.
     pub link: Option<Rc<str>>,
+    /// The PDF form-field data when this box is a form control (see
+    /// [`super::form`]). Pagination fragments leave this `None`.
+    pub form_field: Option<Rc<super::form::FormField>>,
 }
 
 /// The CSS Fragmentation computed values carried by a [`LaidOutBox`].
@@ -1075,6 +1078,7 @@ fn layout_box_impl(
         content,
         marker,
         link: b.link.clone(),
+        form_field: b.form_field.clone(),
     };
     if offset_x != 0.0 {
         shift_box_x_in_place(&mut laid, offset_x);

@@ -1123,6 +1123,7 @@ fn place_split<T>(
                 content: LaidOutContent::Blocks(Vec::new()),
                 marker,
                 link: container.link.clone(),
+                form_field: None,
             };
             Some((seg.page_index, seg.start_index, decoration))
         })
@@ -1243,6 +1244,7 @@ fn place_line(line: &LineBox, page_height: f32, state: &mut PaginationState<'_>,
         marker: None,
         // Likewise, the container's link area is its decoration fragment's.
         link: None,
+        form_field: None,
     };
     *cursor += line.rect.height;
     state.active_mut().boxes.push(fragment);
@@ -1383,6 +1385,7 @@ fn flush_grid_fragment(
         is_float: false,
         marker: None,
         has_visible_decoration: container.has_visible_decoration,
+        form_field: None,
         content: LaidOutContent::Grid(LaidOutGrid {
             rows: std::mem::take(rows),
         }),
@@ -1714,6 +1717,7 @@ fn flush_table_fragment(
         }),
         marker: None,
         link: container.link.clone(),
+        form_field: None,
     };
     state.active_mut().boxes.push(fragment);
 }
@@ -1775,6 +1779,7 @@ fn place_leaf(b: &mut LaidOutBox, state: &mut PaginationState<'_>, cursor: &mut 
         content: std::mem::replace(&mut b.content, LaidOutContent::Blocks(Vec::new())),
         marker: b.marker.take(),
         link: b.link.take(),
+        form_field: b.form_field.take(),
     };
     shift_box_y_in_place(&mut translated, shift);
 

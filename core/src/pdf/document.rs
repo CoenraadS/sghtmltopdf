@@ -67,6 +67,10 @@ use crate::style::{
 use super::color_font::{write_color_fonts, FontPlan};
 use super::file_id::{id_entry, FileIdHasher};
 use super::font::{deflate, embed_font, FontUsage};
+use super::form::{
+    collect_form_widgets, write_acroform, write_merged_field, write_parent_field, write_widget_kid,
+    FieldSet,
+};
 use super::img::{embed_image, ids_for_image, image_resource_name, ImageIds, PreparedImage};
 use super::options::{producer_string, DocumentMetadata, PdfOutputOptions};
 use super::tagging::{strip_empty_artifacts, Bounds, RowTag, Tagger, CONTENT_TAG};
@@ -394,7 +398,33 @@ pub fn encode_pdf_with_options(
     // The bookmarked elements not yet placed: an element split across pages is listed at the
     // page it starts on.
     let mut pending_bookmarks = links.bookmarks.clone();
-    for page in pages {
+
+    // Form fields: collect every page's widgets up front (grouping can
+    // span pages), then allocate their Refs before any page is written.
+    let mut field_set = FieldSet::default();
+    let mut page_form_widgets: Vec<Vec<usize>> = Vec::with_capacity(pages.len());
+    if output.forms {
+        let mut seen = HashSet::new();
+        for page in pages {
+            let mut widgets = Vec::new();
+            for b in &page.boxes {
+                collect_form_widgets(b, styles, settings, &mut seen, &mut widgets);
+            }
+            page_form_widgets.push(field_set.add_widgets(widgets));
+        }
+        for group in &mut field_set.groups {
+            if group.grouped {
+                group.field_ref = Some(alloc.next());
+            }
+        }
+        for slot in &mut field_set.widget_refs {
+            *slot = Some(alloc.next());
+        }
+    } else {
+        page_form_widgets.resize_with(pages.len(), Vec::new);
+    }
+
+    for (page_index, page) in pages.iter().enumerate() {
         let page_id = alloc.next();
         let content_id = alloc.next();
         page_ids.push(page_id);
@@ -480,7 +510,7 @@ pub fn encode_pdf_with_options(
                 }
             }
         }
-        let page_annotation_ids: Vec<Ref> = page_links
+        let mut page_annotation_ids: Vec<Ref> = page_links
             .into_iter()
             .map(|area| {
                 let id = alloc.next();
@@ -488,6 +518,12 @@ pub fn encode_pdf_with_options(
                 id
             })
             .collect();
+        // This page's form widgets join its annotations.
+        for &widget_index in &page_form_widgets[page_index] {
+            if let Some(id) = field_set.widget_refs[widget_index] {
+                page_annotation_ids.push(id);
+            }
+        }
 
         let form_refs: Vec<Ref> = pending_forms.iter().map(|(id, _)| *id).collect();
         let mut p = pdf.page(page_id);
@@ -559,6 +595,35 @@ pub fn encode_pdf_with_options(
         );
     }
 
+    // Write the form fields themselves (their Refs were allocated up front).
+    if !field_set.is_empty() {
+        for group in &field_set.groups {
+            if group.grouped {
+                let parent = group.field_ref.expect("grouped field Ref allocated");
+                write_parent_field(pdf.form_field(parent), group, &field_set);
+                for &widget_index in &group.widgets {
+                    let id = field_set.widget_refs[widget_index].expect("widget Ref allocated");
+                    write_widget_kid(
+                        pdf.annotation(id),
+                        group,
+                        &field_set.widgets[widget_index],
+                        output.scale,
+                        parent,
+                    );
+                }
+            } else {
+                let widget_index = group.widgets[0];
+                let id = field_set.widget_refs[widget_index].expect("widget Ref allocated");
+                write_merged_field(
+                    pdf.form_field(id),
+                    group,
+                    &field_set.widgets[widget_index],
+                    output.scale,
+                );
+            }
+        }
+    }
+
     let dests_id = (!destinations.is_empty()).then(|| alloc.next());
     if let Some(dests_id) = dests_id {
         let mut dests = pdf.destinations(dests_id);
@@ -589,6 +654,12 @@ pub fn encode_pdf_with_options(
         catalog.destinations(dests_id);
     }
     catalog.metadata(metadata_id);
+    if !field_set.is_empty() {
+        let root_refs = field_set.root_refs();
+        let mut form = catalog.form();
+        write_acroform(&mut form, &root_refs);
+        form.finish();
+    }
     if let Some(outline_id) = outline_id {
         catalog.outlines(outline_id);
     }

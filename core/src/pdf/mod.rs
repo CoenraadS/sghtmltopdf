@@ -4,6 +4,7 @@ mod color_font;
 mod document;
 mod file_id;
 mod font;
+pub(crate) mod form;
 mod img;
 mod options;
 mod outline;

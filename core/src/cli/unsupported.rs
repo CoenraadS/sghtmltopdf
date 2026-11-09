@@ -85,11 +85,6 @@ const REASONS: &[Reason] = &[
         ],
     },
     Reason {
-        message: "Generating PDF forms (AcroForm) is not supported.\n  \
-                  Form elements are drawn as static appearance only",
-        options: &["--enable-forms", "--disable-forms"],
-    },
-    Reason {
         message: "Replacing the look of checkboxes and similar controls with SVG is not\n  \
                   supported (the built-in rendering is always used)",
         options: &[

@@ -33,6 +33,9 @@ pub struct LayoutBox {
     /// `inline-block` and so on, or a flex or grid item). The whole box becomes the link
     /// area. An inline `<a>` makes no box: its href is carried on its spans instead.
     pub link: Option<Rc<str>>,
+    /// The PDF form-field data when this box is a form control with an
+    /// AcroForm equivalent (see [`super::form`]).
+    pub form_field: Option<Rc<super::form::FormField>>,
     /// Memoised measurements. See [`MeasureMemo`].
     pub measured: MeasureMemo,
 }
@@ -45,6 +48,7 @@ impl LayoutBox {
             content,
             marker: None,
             link: None,
+            form_field: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -56,6 +60,7 @@ impl LayoutBox {
             content,
             marker: None,
             link: None,
+            form_field: None,
             measured: MeasureMemo::default(),
         }
     }
@@ -408,6 +413,7 @@ pub(crate) fn build_box_for_element(
         return build_pseudo_element_box(styles, node);
     }
     let mut b = build_element_box(dom, styles, node)?;
+    b.form_field = super::form::form_field_for(dom, node).map(Rc::new);
     // An inline `<a>` reaches here only as a top-level element in streaming mode. Its href is
     // already on the spans (`build_element_box`), so the area hugs the text rather than the
     // whole width of the box.
@@ -1057,6 +1063,7 @@ fn build_inline_block_box(
 
     let mut b = LayoutBox::for_node(node, content);
     b.link = link_href(dom, node);
+    b.form_field = super::form::form_field_for(dom, node).map(Rc::new);
     Some(b)
 }
 

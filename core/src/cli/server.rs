@@ -73,6 +73,9 @@ const ALLOWED_QUERY_KEYS: &[&str] = &[
     "enable-toc-back-links",
     // Links
     "disable-external-links",
+    // Forms
+    "enable-forms",
+    "disable-forms",
     "disable-internal-links",
     "keep-relative-links",
     // How input is interpreted, and what to do on failure

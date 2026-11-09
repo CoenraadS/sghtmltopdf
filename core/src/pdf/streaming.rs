@@ -36,6 +36,10 @@ use super::document::{
 };
 use super::file_id::{id_entry, FileIdHasher};
 use super::font::{deflate, embed_font_streaming_chunks, FontUsage};
+use super::form::{
+    collect_form_widgets, write_acroform, write_merged_field, write_parent_field, write_widget_kid,
+    FieldSet,
+};
 use super::img::{embed_image_streaming_chunks, ids_for_image, ImageIds, PreparedImage};
 use super::options::PdfOutputOptions;
 use super::outline::{collect_bookmark_positions, write_outline, Bookmark, OutlineEntry};
@@ -118,6 +122,9 @@ pub struct StreamingPdfWriter<S: Sink> {
     deferred_decorations: Vec<(Ref, usize)>,
     /// Present when writing a tagged PDF (`PdfOutputOptions::tagged`).
     tagger: Option<Tagger>,
+    /// Form fields collected page by page (group parents are written in `finish`).
+    form_set: FieldSet,
+    form_seen: HashSet<NodeId>,
 }
 
 impl<S: Sink> StreamingPdfWriter<S> {
@@ -202,6 +209,8 @@ impl<S: Sink> StreamingPdfWriter<S> {
             defer_overlays: false,
             deferred_decorations: Vec::new(),
             tagger,
+            form_set: FieldSet::default(),
+            form_seen: HashSet::new(),
         };
         for (step, id) in alpha_gs_ids.into_iter().enumerate() {
             let a = step as f32 / ALPHA_STEPS as f32;
@@ -523,6 +532,57 @@ impl<S: Sink> StreamingPdfWriter<S> {
                 }
             }
         }
+        // This page's form fields: collect, allocate and write the
+        // widgets now; grouped parents are written in `finish`.
+        let mut form_annotation_ids: Vec<Ref> = Vec::new();
+        if self.output.forms {
+            let mut widgets = Vec::new();
+            for b in &page.boxes {
+                collect_form_widgets(b, styles, &self.settings, &mut self.form_seen, &mut widgets);
+            }
+            let added = self.form_set.add_widgets(widgets);
+            for group in &mut self.form_set.groups {
+                if group.grouped && group.field_ref.is_none() {
+                    group.field_ref = Some(self.alloc.next());
+                }
+            }
+            for &widget_index in &added {
+                let id = self.alloc.next();
+                self.form_set.widget_refs[widget_index] = Some(id);
+                form_annotation_ids.push(id);
+            }
+            for &widget_index in &added {
+                let id = self.form_set.widget_refs[widget_index].expect("widget Ref");
+                let group_index = self
+                    .form_set
+                    .groups
+                    .iter()
+                    .position(|g| g.widgets.contains(&widget_index))
+                    .expect("widget group");
+                let mut chunk = Chunk::new();
+                if self.form_set.groups[group_index].grouped {
+                    let parent = self.form_set.groups[group_index]
+                        .field_ref
+                        .expect("parent Ref");
+                    write_widget_kid(
+                        chunk.annotation(id),
+                        &self.form_set.groups[group_index],
+                        &self.form_set.widgets[widget_index],
+                        self.output.scale,
+                        parent,
+                    );
+                } else {
+                    write_merged_field(
+                        chunk.form_field(id),
+                        &self.form_set.groups[group_index],
+                        &self.form_set.widgets[widget_index],
+                        self.output.scale,
+                    );
+                }
+                self.write_chunk(id, &chunk)?;
+            }
+        }
+
         let mut annotation_ids = Vec::with_capacity(page_links.len());
         for area in &page_links {
             let id = self.alloc.next();
@@ -570,8 +630,13 @@ impl<S: Sink> StreamingPdfWriter<S> {
                     p.struct_parents(key);
                 }
             }
-            if !annotation_ids.is_empty() {
-                p.annotations(annotation_ids.iter().copied());
+            if !annotation_ids.is_empty() || !form_annotation_ids.is_empty() {
+                p.annotations(
+                    annotation_ids
+                        .iter()
+                        .copied()
+                        .chain(form_annotation_ids.iter().copied()),
+                );
             }
             write_resources(
                 p.resources(),
@@ -796,6 +861,22 @@ impl<S: Sink> StreamingPdfWriter<S> {
             }
         }
 
+        // The grouped form-field parents, now that every kid is known.
+        if !self.form_set.is_empty() {
+            let groups = std::mem::take(&mut self.form_set.groups);
+            let mut set = std::mem::take(&mut self.form_set);
+            set.groups = groups;
+            for group in &set.groups {
+                if group.grouped {
+                    let parent = group.field_ref.expect("parent Ref allocated");
+                    let mut chunk = Chunk::new();
+                    write_parent_field(chunk.form_field(parent), group, &set);
+                    self.write_chunk(parent, &chunk)?;
+                }
+            }
+            self.form_set = set;
+        }
+
         // The outline is written here for the same reason: it needs every entry.
         let entries = std::mem::take(&mut self.outline_entries);
         let mut alloc = std::mem::take(&mut self.alloc);
@@ -822,6 +903,12 @@ impl<S: Sink> StreamingPdfWriter<S> {
                 catalog.destinations(dests_id);
             }
             catalog.metadata(metadata_id);
+            if !self.form_set.is_empty() {
+                let root_refs = self.form_set.root_refs();
+                let mut form = catalog.form();
+                write_acroform(&mut form, &root_refs);
+                form.finish();
+            }
             if let Some(outline_id) = outline_id {
                 catalog.outlines(outline_id);
             }

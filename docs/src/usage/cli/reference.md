@@ -128,6 +128,7 @@ HTMLの`<html lang>`は、PDFカタログの`/Lang`(文書の言語)になりま
 | `--minimum-font-size <PX>` | 算出`font-size`の下限 |
 | `--disable-external-links` | 外部リンク(http(s))のPDF注釈を作らない |
 | `--disable-internal-links` | 内部リンク(`#id`)のPDF注釈を作らない |
+| `--disable-forms` | フォーム要素を入力可能なPDFフィールド(AcroForm)にせず、見た目だけ描画する |
 | `--keep-relative-links` | 相対URLの外部リンクを絶対化せずそのまま書く |
 | `--load-media-error-handling <ignore\|abort>` | 画像・CSS・フォントの取得失敗時の挙動(既定`ignore`) |
 

@@ -1901,7 +1901,6 @@ fn unsupported_wkhtmltopdf_options_explain_why() {
         ("--xsl-style-sheet", "--user-style-sheet"),
         ("--image-quality", "images"),
         ("--proxy", "proxy"),
-        ("--enable-forms", "forms"),
     ] {
         let out = Command::new(BIN)
             .arg(SAMPLE_HTML)

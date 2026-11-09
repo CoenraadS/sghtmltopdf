@@ -298,6 +298,14 @@ pub struct ConvertArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub disable_internal_links: bool,
 
+    /// Create fillable PDF form fields from HTML form controls (the default)
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub enable_forms: bool,
+
+    /// Draw HTML form controls as static appearance only, without form fields
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub disable_forms: bool,
+
     /// Write relative external link URLs as-is instead of resolving them to absolute URLs
     #[arg(long, action = ArgAction::SetTrue)]
     pub keep_relative_links: bool,
@@ -625,6 +633,7 @@ impl ConvertArgs {
             header_line: self.header_line,
             footer_line: self.footer_line,
             tagged: self.tagged,
+            forms: !self.disable_forms,
         }
     }
 

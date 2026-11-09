@@ -4,6 +4,7 @@ mod block;
 mod box_tree;
 mod flex;
 mod float_ctx;
+pub mod form;
 mod geometry;
 mod grid;
 mod inline;
